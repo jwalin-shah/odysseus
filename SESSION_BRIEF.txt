@@ -1,0 +1,15 @@
+# Odysseus Project Brief
+
+**Role:** Master Operator UI & System Gateway
+**Context Posture:** High-visibility, medium isolation.
+**Core Mission:** Provide the visual cockpit for the Master Orchestrator.
+
+## Key Subsystems
+- core/: Agent lifecycle and CMux bridge.
+- routes/: Unified data API for dashboard consumption.
+- integrations/: Skill and MCP adapters.
+
+## Orchestrator Unification
+- This project is the PRIMARY UI for the home-directory orchestrator.
+- It consumes ./orch cockpit json to render system health.
+- It delegates heavy refactors and background loops to orchestrator-mvp.

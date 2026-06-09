@@ -1,0 +1,19 @@
+{
+  "project": "odysseus",
+  "description": "Master Operator UI & System Gateway",
+  "workspace": "/Users/jwalinshah/projects/odysseus",
+  "isolation": "medium",
+  "context_firewall": {
+    "project_scoped_memory": true,
+    "agent_contracts": ["GEMINI.md", "AGENTS.md"]
+  },
+  "validation_commands": [
+    "python3 -m pytest tests/",
+    "./scripts/check_tooling.sh"
+  ],
+  "hooks_status": "inherits_global",
+  "next_actions": [
+    "Bridge ./orch cockpit json into the routes/ workspace.",
+    "Implement visual heartbeat triage."
+  ]
+}
