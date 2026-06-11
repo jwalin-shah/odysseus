@@ -7,6 +7,8 @@ from datetime import datetime
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=50000, description="Chat message")
     session: str = Field(..., description="Session ID")
+    model: Optional[str] = Field(default=None, description="Override model ID")
+    mode: Optional[str] = Field(default=None, description="Override session mode (e.g. 'agent')")
     attachments: Optional[List[str]] = Field(default=[], description="Attachment IDs")
     use_web: Optional[bool] = Field(default=False, description="Enable web search")
     use_research: Optional[bool] = Field(default=False, description="Enable deep research")

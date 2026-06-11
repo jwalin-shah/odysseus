@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""odysseus-brain — Brain dump ingestion and context CLI.
+
+Ingest stream-of-consciousness notes, retrieve structured brain context,
+and list recent entries from the knowledge base.
+
+    odysseus-brain dump --text "your brain dump here"
+    odysseus-brain dump                          # read from stdin
+    odysseus-brain context                       # show current brain context
+    odysseus-brain list                          # list recent entries (7 days)
+    odysseus-brain list --days 14                # list entries from last 14 days
+    odysseus-brain delete SLUG                   # delete an entry by slug
+
+Reads/writes the same ``knowledge-base/`` directory the web UI uses via
+the ``brain_engine`` module.
+"""
+
+from __future__ import annotations
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
+from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+quiet_logs()
+
+import asyncio
+import logging
+
+try:
+    from src.brain_engine import (
+        build_context_prefix,
+        delete_entry,
+        get_cached_context_prefix,
+        get_recent_entries,
+        ingest_brain_dump,
+    )
+    quiet_logs()
+except ModuleNotFoundError as e:
+    sys.stderr.write(f"error: {e}\nhint: run from repo root with venv active.\n")
+    sys.exit(2)
+
+
+def cmd_dump(args):
+    text = getattr(args, "text", None) or ""
+    if not text:
+        # Read from stdin
+        if sys.stdin.isatty():
+            sys.stderr.write("Reading brain dump from stdin (Ctrl-D to finish):\n")
+        text = sys.stdin.read().strip()
+
+    if not text:
+        fail("no text provided — use --text or pipe via stdin")
+
+    result = asyncio.run(ingest_brain_dump(text=text))
+    emit(result, args)
+
+
+def cmd_context(args):
+    ctx = get_cached_context_prefix()
+    if not ctx:
+        # Fall back to building it fresh
+        ctx = build_context_prefix()
+    if args.raw:
+        sys.stdout.write(ctx + "\n")
+    else:
+        entries = get_recent_entries()
+        emit({"context": ctx, "entry_count": len(entries)}, args)
+
+
+def cmd_list(args):
+    entries = get_recent_entries(days=args.days)
+    rows = [
+        {
+            "date": e["date"],
+            "slug": e["slug"],
+            "type": (e["frontmatter"].get("categories") or ["unknown"])[0],
+            "tags": e["frontmatter"].get("tags", []),
+            "title": e["frontmatter"].get("title", e["slug"]),
+        }
+        for e in entries
+    ]
+    emit(rows, args)
+
+
+def cmd_delete(args):
+    deleted = delete_entry(args.slug)
+    if not deleted:
+        fail(f"no entry with slug {args.slug!r}")
+    emit({"ok": True, "deleted": args.slug}, args)
+
+
+def _build_parser():
+    p = common_parser("odysseus-brain", "Brain dump ingestion and context CLI.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # dump
+    pd = sub.add_parser("dump", parents=p._common_parents,
+                        help="Ingest a brain dump")
+    pd.add_argument("--text", "-t", default="",
+                    help="Brain dump text (reads from stdin if omitted)")
+    pd.set_defaults(func=cmd_dump)
+
+    # context
+    pc = sub.add_parser("context", parents=p._common_parents,
+                        help="Show current brain context prefix")
+    pc.add_argument("--raw", action="store_true",
+                    help="Print raw markdown instead of JSON")
+    pc.set_defaults(func=cmd_context)
+
+    # list
+    pl = sub.add_parser("list", parents=p._common_parents,
+                        help="List recent brain entries")
+    pl.add_argument("--days", "-d", type=int, default=7,
+                    help="Number of days to look back (default: 7)")
+    pl.set_defaults(func=cmd_list)
+
+    # delete
+    pdel = sub.add_parser("delete", parents=p._common_parents,
+                          help="Delete a brain entry by slug")
+    pdel.add_argument("slug", help="Slug of the entry to delete")
+    pdel.set_defaults(func=cmd_delete)
+
+    return p
+
+
+if __name__ == "__main__":
+    sys.exit(run(_build_parser()))

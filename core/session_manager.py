@@ -117,6 +117,7 @@ class SessionManager:
             history=[],
             owner=getattr(db_session, "owner", None),
             is_important=getattr(db_session, "is_important", False) or False,
+            mode=getattr(db_session, "mode", "chat") or "chat",
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
         return session
@@ -175,6 +176,7 @@ class SessionManager:
             history=history,
             owner=getattr(db_session, 'owner', None),
             is_important=getattr(db_session, 'is_important', False) or False,
+            mode=getattr(db_session, 'mode', 'chat') or 'chat',
         )
 
         session.message_count = getattr(db_session, 'message_count', len(history))
@@ -394,6 +396,7 @@ class SessionManager:
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
             session.is_important = getattr(db_session, "is_important", False) or False
+            session.mode = getattr(db_session, "mode", "chat") or "chat"
             session.message_count = getattr(db_session, "message_count", session.message_count) or 0
             return True
         except Exception as e:

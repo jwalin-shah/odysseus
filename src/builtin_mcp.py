@@ -71,6 +71,7 @@ _BUILTIN_SERVERS = {
     "memory":     ("mcp_servers/memory_server.py",     "Built-in: Memory"),
     "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
+    "inbox":      ("mcp_servers/inbox_server.py",      "Built-in: Inbox (iMessage/Gmail/Calendar/Notes/Reminders/GitHub/Drive)"),
 }
 
 # NPX-based built-in servers (run via npx, not Python)

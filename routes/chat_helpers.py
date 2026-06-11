@@ -212,7 +212,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
             continue
         # Quick ping
         ping_url = build_models_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(ep.api_key, base, getattr(ep, "api_key_env", None))
         try:
             r = _req.get(ping_url, headers=headers, timeout=5)
             r.raise_for_status()
@@ -229,7 +229,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
             # Found a working endpoint — update session
             new_model = models[0]
             chat_url = build_chat_url(base)
-            new_headers = build_headers(ep.api_key, base)
+            new_headers = build_headers(ep.api_key, base, getattr(ep, "api_key_env", None))
 
             sess.model = new_model
             sess.endpoint_url = chat_url
@@ -354,10 +354,10 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
             for ep in q.all():
                 if not _session_url_matches_endpoint(target_url, ep.base_url or ""):
                     continue
-                if not ep.api_key:
+                if not ep.api_key and not getattr(ep, "api_key_env", None):
                     return
                 base = normalize_base(ep.base_url or "")
-                sess.headers = build_headers(ep.api_key, base)
+                sess.headers = build_headers(ep.api_key, base, getattr(ep, "api_key_env", None))
                 update_q = db.query(DBSession).filter(DBSession.id == session_id)
                 if owner:
                     update_q = update_q.filter(DBSession.owner == owner)

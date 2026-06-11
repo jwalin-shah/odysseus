@@ -277,6 +277,8 @@ def setup_chat_routes(
         use_research = chat_request.use_research
         time_filter = chat_request.time_filter
         preset_id = chat_request.preset_id
+        model_override = chat_request.model
+        mode_override = chat_request.mode
 
         # Verify the caller owns this session before loading it.
         # Without this, any authenticated user can post into another user's chat.
@@ -286,6 +288,13 @@ def setup_chat_routes(
             sess = session_manager.get_session(session)
         except KeyError:
             raise HTTPException(404, f"Session '{session}' not found")
+
+        # Apply model/mode overrides (crucial for background miners/tools)
+        if model_override:
+            sess.model = model_override
+        if mode_override:
+            sess.mode = mode_override
+            
         owner = get_current_user(request)
         if _clear_orphaned_session_endpoint(sess, owner=owner):
             raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
@@ -395,6 +404,20 @@ def setup_chat_routes(
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        # No explicit mode from the client? Use the session's stored mode (set
+        # by the UI's chat/agent/research toggle on prior messages). Without
+        # this fallback, a session in 'chat' mode silently reverts to the
+        # agent path on the next send — which breaks reasoning models (e.g.
+        # MiniMax-M3 on tokenrouter) because the agent system prompt + tool
+        # schema makes the model spend its whole budget inside <think> and
+        # never emit a visible answer.
+        if not chat_mode:
+            try:
+                _persisted = get_session_mode(session)
+            except Exception:
+                _persisted = ""
+            if _persisted in ("chat", "agent"):
+                chat_mode = _persisted
         # Workspace: confine the agent's file/shell tools to this folder. Validate
         # it's a real directory; ignore (no confinement) otherwise.
         workspace = (form_data.get("workspace") or "").strip()

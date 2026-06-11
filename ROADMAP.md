@@ -46,6 +46,7 @@ the codebase, you are probably right to stay away.
 - Provider setup/probing audit for Anthropic, Gemini, Groq, xAI, OpenRouter, OpenAI, and DeepSeek.
 
 ## Refactor Targets
+- **Engine Refactor (Phase 1):** Break apart the monolithic 4000-line `tool_implementations.py` and 1300-line `tool_schemas.py` into a dynamic `@odysseus_tool` registry (`src/tools/`). This will allow specialized Agent-Computer Interface (ACI) tools without causing god-object merge conflicts.
 - CSS cleanup. `static/style.css` basically Calypso's island atm.
 - Tour core helper. The onboarding tours have too much copy-pasted scaffolding; promote a shared `tour-core.js` helper before adding more tours.
 - Modal/window positioning cleanup. Some window controls have improved, but the
@@ -71,7 +72,11 @@ the codebase, you are probably right to stay away.
 ## Backend
 
 - More tests around endpoint probing and provider setup.
-- Better task scheduler defaults and visibility.
+- **Task Visibility & Auto-Injection (Phase 2):** Fix the "fire-and-forget" blind spot. Implement `visibility_tools.py` (`get_research_report`, `get_shell_job_status`) and hook `task_scheduler.py` to auto-inject background completion payloads directly into the active session context.
+- **Advanced Agent Super-Skills (Phase 3):** Fully integrate SWE-Agent, Aider, and Cline style workflows.
+  - *Repo Map (`/explore`):* Use AST (via `llm-tldr`) to map repositories before editing, avoiding context bloat.
+  - *Test-Driven Auto-Fix (`/auto-fix`):* Autonomous loops to write tests, run them in bash, and self-correct.
+  - *Cline Checklist Protocol:* Explicit visual markdown planning loops to prevent the LLM from losing state on long tasks.
 - Backup/restore guide and helper flow for `data/`.
 - Security hardening around admin-only tools and clear docs for their risk.
 

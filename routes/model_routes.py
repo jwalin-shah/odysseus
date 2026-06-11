@@ -502,9 +502,16 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
-def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
+def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False, api_key_env: Optional[str] = None) -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
     provider = _detect_provider(base)
+    # Resolve the effective credential: prefer the DB-stored key, fall back to
+    # the env var named by ``api_key_env`` (so endpoints can be wired to
+    # Infisical/1Password without re-encrypting on every rotate).
+    import os as _os
+    effective_key = (api_key or "").strip()
+    if not effective_key and api_key_env:
+        effective_key = (_os.environ.get(api_key_env) or "").strip()
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Say OK"},
@@ -515,7 +522,7 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
     if provider == "anthropic":
         from src.llm_core import _normalize_anthropic_url, _build_anthropic_headers, _build_anthropic_payload
         target_url = _normalize_anthropic_url(base)
-        auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        auth_headers = {"Authorization": f"Bearer {effective_key}"} if effective_key else {}
         h = _build_anthropic_headers(auth_headers)
         payload = _build_anthropic_payload(model_id, messages, 0.0, 5)
         if _test_tools:
@@ -523,12 +530,12 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
     elif provider == "ollama":
         from src.llm_core import _build_ollama_payload
         target_url = build_chat_url(base)
-        h = build_headers(api_key, base)
+        h = build_headers(api_key, base, api_key_env)
         h["Content-Type"] = "application/json"
         payload = _build_ollama_payload(model_id, messages, 0.0, 5, stream=False, tools=_test_tools)
     else:
         target_url = build_chat_url(base)
-        h = build_headers(api_key, base)
+        h = build_headers(api_key, base, api_key_env)
         h["Content-Type"] = "application/json"
         from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
         _max_key = "max_completion_tokens" if _uses_max_completion_tokens(model_id) else "max_tokens"
@@ -613,17 +620,27 @@ def _effective_endpoint_kind(ep: Any, base_url: str) -> str:
 
 
 
-def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5, api_key_env: Optional[str] = None) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
-    For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
+    For Anthropic, queries their /v1/models API, falling back to hardcoded list.
+
+    ``api_key_env`` is an optional env-var name; when ``api_key`` is empty and
+    ``api_key_env`` is set, the credential is read from ``os.environ[api_key_env]``
+    at call time. This lets endpoints be wired to Infisical/1Password/etc. without
+    re-encrypting on every rotate. See ModelEndpoint.api_key_env.
+    """
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
     if _detect_provider(base) == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = build_models_url(base)
         headers = {"anthropic-version": "2023-06-01"}
-        if api_key:
-            headers["x-api-key"] = api_key
+        import os
+        effective_key = (api_key or "").strip()
+        if not effective_key and api_key_env:
+            effective_key = (os.environ.get(api_key_env) or "").strip()
+        if effective_key:
+            headers["x-api-key"] = effective_key
         try:
             r = httpx.get(url, headers=headers, timeout=timeout, verify=llm_verify())
             r.raise_for_status()
@@ -632,19 +649,19 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             if models:
                 return models
         except httpx.HTTPStatusError as e:
-            if api_key:
+            if effective_key:
                 status = e.response.status_code if e.response is not None else "unknown"
                 logger.warning(f"Anthropic /v1/models failed with API key: HTTP {status}")
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         except Exception as e:
-            if api_key:
+            if effective_key:
                 logger.warning(f"Anthropic /v1/models failed with API key: {e}")
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         return list(ANTHROPIC_MODELS)
     url = build_models_url(base)
-    headers = build_headers(api_key, base)
+    headers = build_headers(api_key, base, api_key_env)
     try:
         r = httpx.get(url, headers=headers, timeout=timeout, verify=llm_verify())
         r.raise_for_status()
@@ -698,11 +715,11 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     return []
 
 
-def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> Dict[str, Any]:
+def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5, api_key_env: Optional[str] = None) -> Dict[str, Any]:
     """Reachability probe that does not require installed/listed models."""
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
-    headers = build_headers(api_key, base)
+    headers = build_headers(api_key, base, api_key_env)
 
     # Ollama exposes /v1/models (OpenAI-compatible) AND native /api/version,
     # /api/tags. Probe native paths for Ollama-style endpoints, but avoid using
@@ -1648,12 +1665,12 @@ def setup_model_routes(model_discovery):
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
-            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key}
+            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key, "api_key_env": getattr(ep, "api_key_env", None)}
         finally:
             db.close()
 
         base = _normalize_base(ep_data["base_url"])
-        all_models = _probe_endpoint(base, ep_data["api_key"])
+        all_models = _probe_endpoint(base, ep_data["api_key"], api_key_env=ep_data.get("api_key_env"))
         chat_models = [m for m in all_models if _is_chat_model(m)]
         skipped = len(all_models) - len(chat_models)
 
@@ -1662,7 +1679,7 @@ def setup_model_routes(model_discovery):
             failed = []
             ok_count = 0
             for mid in chat_models:
-                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
+                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8, api_key_env=ep_data.get("api_key_env"))
                 result["model"] = mid
                 result["type"] = "probe_result"
                 result["endpoint"] = ep_data["name"]

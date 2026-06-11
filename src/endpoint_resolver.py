@@ -185,20 +185,35 @@ def build_models_url(base: str) -> str:
     return base + "/models"
 
 
-def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
-    """Build auth headers for an endpoint."""
+def build_headers(api_key: Optional[str], base: str, api_key_env: Optional[str] = None) -> Dict[str, str]:
+    """Build auth headers for an endpoint.
+
+    Resolution order for the credential:
+      1. ``api_key`` (decrypted from DB EncryptedText) — existing behavior
+      2. ``api_key_env`` → ``os.environ[api_key_env]`` — when set, lets the
+         key live in the process env (Infisical, 1Password, systemd
+         ``LoadCredential=``, etc.) and never be written back to the DB.
+         This makes rotation a one-line env update + restart, with no DB
+         write and no at-rest secret.
+    Both can be empty; the caller decides what to do with a header-less
+    request (it will likely 401, which is the correct failure mode).
+    """
+    import os
     provider = _detect_provider(base)
     headers: Dict[str, str] = {}
+    effective_key = (api_key or "").strip()
+    if not effective_key and api_key_env:
+        effective_key = (os.environ.get(api_key_env) or "").strip()
     if provider == "anthropic":
-        if api_key:
-            headers["x-api-key"] = api_key
+        if effective_key:
+            headers["x-api-key"] = effective_key
         headers["anthropic-version"] = "2023-06-01"
         return headers
     if provider == "copilot":
         from src.copilot import copilot_headers
-        return copilot_headers(api_key)
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        return copilot_headers(effective_key or api_key)
+    if effective_key:
+        headers["Authorization"] = f"Bearer {effective_key}"
     if provider == "openrouter":
         headers.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
         headers.setdefault("X-OpenRouter-Title", "Odysseus")
@@ -277,7 +292,7 @@ def resolve_endpoint(
 
         base = normalize_base(ep.base_url)
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(ep.api_key, base, getattr(ep, "api_key_env", None))
 
         # Discard a configured model the user has since disabled on the
         # endpoint (e.g. a stale `default_model` left pointing at a now-hidden
@@ -323,7 +338,7 @@ def resolve_endpoint_by_id(
             return None
         base = normalize_base(ep.base_url)
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(ep.api_key, base, getattr(ep, "api_key_env", None))
         m = (model or "").strip()
         # Drop a model the user disabled on the endpoint, then pick the first
         # enabled chat model rather than a hidden one.

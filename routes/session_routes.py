@@ -1,5 +1,6 @@
 # routes/session_routes.py
 import re
+import os
 import html
 import json
 import uuid
@@ -107,6 +108,13 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
     """
     user = effective_user(request)
     if not user:
+        # Single-user / unauthenticated mode: when AUTH_ENABLED=false, there is
+        # no logged-in user to own the session, so the ownership check is
+        # meaningless. Mirror require_user() in src/auth_helpers.py and let
+        # the request through. Routes that need a real username for
+        # attribution still get "" from effective_user and can branch on it.
+        if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+            return
         raise HTTPException(403, "Authentication required")
     db = SessionLocal()
     try:

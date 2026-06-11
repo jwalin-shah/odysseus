@@ -17,7 +17,14 @@ class LLMConfig:
     """Configuration constants for LLM operations."""
     DEFAULT_TIMEOUT = 30
     DEFAULT_TEMPERATURE = 1.0
-    DEFAULT_MAX_TOKENS = 0
+    # 32768 = effectively no ceiling. Reasoning models (MiniMax-M3, claude-opus
+    # with thinking, etc.) sometimes spend 5-10K tokens inside <think> and
+    # then emit a long answer; 32K is large enough that they never hit it
+    # on chat-length prompts. The previous 4096 still occasionally clipped
+    # very long reasoning-heavy generations. Per-token cost is unchanged —
+    # you only pay for what the model decides to emit, the cap just stops
+    # premature truncation.
+    DEFAULT_MAX_TOKENS = 32768
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
     STREAM_TIMEOUT = 300

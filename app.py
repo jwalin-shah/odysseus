@@ -282,6 +282,8 @@ if AUTH_ENABLED:
             # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
             # network-exposed deployments regardless.
             if LOCALHOST_BYPASS and _is_trusted_loopback(request):
+                request.state.current_user = "admin"
+                request.state.api_token = False
                 return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
@@ -1080,6 +1082,11 @@ async def _startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
+    
+    # Custom automated AI miners (GitHits, ArXiv, Transcript Mining)
+    from src.bg_miners import start_all_miners
+    _startup_tasks.append(asyncio.create_task(start_all_miners()))
+
     logger.info("Application startup complete")
 
 async def _shutdown_event():

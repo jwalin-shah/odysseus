@@ -341,6 +341,7 @@ class ModelEndpoint(TimestampMixin, Base):
     hidden_models = Column(Text, nullable=True)    # JSON list of model IDs that failed probing
     cached_models = Column(Text, nullable=True)    # JSON list of last-known model IDs (avoids probe on list)
     pinned_models = Column(Text, nullable=True)    # JSON list of admin-pinned model IDs (manual, may not appear in /v1/models)
+    api_key_env = Column(String, nullable=True)    # env-var name to read the API key from at request time; when set, takes precedence over the encrypted `api_key` column. Lets endpoints be wired to Infisical/1Password/etc. without re-encrypting on every rotate.
     model_type = Column(String, nullable=True, default="llm")  # "llm" or "image"
     # auto = classify by URL; local = self-hosted server; api/proxy = external
     # OpenAI-compatible API even when reachable through a private/tailnet IP.
@@ -912,6 +913,31 @@ def _migrate_add_pinned_models_column():
         conn.close()
     except Exception as e:
         logging.getLogger(__name__).warning(f"pinned_models migration failed: {e}")
+
+def _migrate_add_api_key_env_column():
+    """Add api_key_env column to model_endpoints if it doesn't exist.
+
+    Lets an endpoint declare that its API key should be read from a process
+    env var (e.g. when sourced from Infisical at boot) instead of the
+    EncryptedText `api_key` column. env-var-sourced keys are NOT written
+    back to the DB; they live only in the process env, which makes
+    rotation cheap and removes the key from at-rest persistence.
+    """
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "api_key_env" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN api_key_env VARCHAR")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'api_key_env' column to model_endpoints")
+        conn.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"api_key_env migration failed: {e}")
 
 def _migrate_add_notes_sort_order():
     """Add sort_order, image_url, repeat columns to notes if they don't exist."""
@@ -1590,6 +1616,7 @@ def init_db():
     _migrate_add_hidden_models_column()
     _migrate_add_cached_models_column()
     _migrate_add_pinned_models_column()
+    _migrate_add_api_key_env_column()
     _migrate_add_notes_sort_order()
     _migrate_add_model_type_column()
     _migrate_add_model_endpoint_refresh_columns()

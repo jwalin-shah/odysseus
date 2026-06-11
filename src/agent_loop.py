@@ -476,7 +476,8 @@ _API_HOSTS = frozenset([
     "localhost", "127.0.0.1", "host.docker.internal",
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
-                           "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
+                           "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed",
+                           "githits", "arxiv", "repository", "paper"])
 _ADMIN_SCHEMA_NAMES = frozenset([
     "manage_session", "manage_skills", "manage_tasks",
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
@@ -1524,7 +1525,7 @@ async def stream_agent_loop(
     # The per-endpoint supports_tools flag (True/False) always takes priority
     # and can override this list for users who know their setup.
     _model_no_tools = any(kw in _model_lc for kw in (
-        "deepseek-r1",
+        "deepseek-r1", "minimax-m3",
     ))
     # Native Ollama endpoints (/api/chat) handle tool schemas differently from
     # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to

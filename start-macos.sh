@@ -205,4 +205,22 @@ if [ -n "$TAILSCALE_URL" ]; then
 fi
 echo "  (this takes a few seconds; press Ctrl+C here to stop)"
 echo
-"$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+
+# Pull API keys from Infisical at boot. Skipped when ODYSSEUS_NO_INFISICAL=1
+# (e.g. for offline dev, debugging the infisical wrapper, or environments
+# without a configured Infisical auth). When enabled, secrets under
+# /providers/tokenrouter are injected as env vars in the odysseus process;
+# endpoints with a non-null `api_key_env` column (see core/database.py)
+# read from those env vars instead of the DB-encrypted key. This makes
+# rotation a one-line `infisical secrets set` + restart, with no DB write.
+if [ -z "$ODYSSEUS_NO_INFISICAL" ] && [ -x /opt/homebrew/bin/infisical ]; then
+  echo "  (Infisical: pulling /providers/tokenrouter secrets into process env)"
+  exec /opt/homebrew/bin/infisical run --path /providers/tokenrouter -- "$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+else
+  if [ -n "$ODYSSEUS_NO_INFISICAL" ]; then
+    echo "  (Infisical: skipped — ODYSSEUS_NO_INFISICAL is set)"
+  else
+    echo "  (Infisical: skipped — /opt/homebrew/bin/infisical not found)"
+  fi
+  exec "$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+fi

@@ -199,6 +199,24 @@ class ChatProcessor:
             "content": UNTRUSTED_CONTEXT_POLICY,
         })
 
+        # Brain context: cached prefix of recent brain-dump entries
+        # (knowledge-base/_cache). Single file read — no LLM call, no
+        # directory walk. Skipped in incognito so private sessions don't
+        # surface the user's running notes.
+        if not incognito:
+            try:
+                from src.settings import get_setting
+                if get_setting("brain_context_inject", True):
+                    from src.brain_engine import get_cached_context_prefix
+                    brain_ctx = get_cached_context_prefix()
+                    if brain_ctx:
+                        preface.append(untrusted_context_message(
+                            "brain context: recent decisions and notes",
+                            brain_ctx,
+                        ))
+            except Exception:
+                logger.debug("Failed to add brain context", exc_info=True)
+
         # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
         self._last_used_memories = []  # track what was injected
         if use_memory:
