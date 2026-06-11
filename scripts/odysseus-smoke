@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+"""odysseus-smoke — live smoke-test harness for the Odysseus app.
+
+Checks that the running Odysseus server (http://localhost:7860 by default)
+is healthy and that every mode/model combination actually produces a visible
+non-empty answer end-to-end.
+
+Checks:
+  1. health          — GET /api/orchestration/health: assert 200 + healthy=true
+  2. route_chat      — POST /api/route (sync=true): assert in-band contract,
+                       non-empty response, no error field
+  3. chat_mode_e2e   — POST /api/chat_stream in chat mode, SSE stream, assert
+                       a visible (non-thinking) delta arrives within timeout
+  4. agent_mode_e2e  — same but mode=agent; catches the MiniMax-M3 reasoning
+                       bug (model only emits thinking deltas, zero visible answer)
+  5. tokenrouter_upstream — basic sanity on the default configured model
+                       endpoint; skipped if endpoint config is not readable.
+
+Usage:
+    scripts/odysseus-smoke                    # all checks, table output
+    scripts/odysseus-smoke --check health     # single check
+    scripts/odysseus-smoke --timeout 30       # override per-check timeout
+    scripts/odysseus-smoke --json             # JSON-only stdout
+
+Exit codes:
+    0 — all non-skipped checks passed
+    1 — at least one check failed
+
+Output:
+    - Human-readable table to stdout (or --json for JSON-only)
+    - Appends one JSONL line to data/orchestration/smoke.jsonl
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+BASE_URL = os.environ.get("ODYSSEUS_URL", "http://localhost:7860")
+SMOKE_JSONL = Path(__file__).parent.parent / "data" / "orchestration" / "smoke.jsonl"
+SMOKE_MESSAGE = "Reply with exactly: SMOKE OK"
+SESSION_PREFIX = "SMOKE-TEST"
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CheckResult:
+    name: str
+    status: str  # "pass" | "fail" | "skipped"
+    latency_ms: float
+    reason: str = ""
+    detail: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# SSE parser
+# ---------------------------------------------------------------------------
+
+
+def parse_sse_chunks(raw_text: str):
+    """Yield parsed data dicts from raw SSE text.
+
+    Yields (event_type, data) where event_type is 'data' or 'event:<name>'.
+    Handles both `data: {...}` and `event: error` lines.
+    """
+    current_event = None
+    for line in raw_text.splitlines():
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                yield (current_event or "data", "[DONE]")
+                current_event = None
+                continue
+            try:
+                yield (current_event or "data", json.loads(payload))
+            except json.JSONDecodeError:
+                yield (current_event or "data", payload)
+            current_event = None
+        elif not line:
+            current_event = None
+
+
+# Mirrors src/agent_loop.py:1369 — the string the app shows when the upstream
+# model generates nothing. If this appears as the "visible reply", the turn failed.
+APP_EMPTY_RESPONSE_FALLBACK = "The model returned an empty response."
+
+# Reasoning can also arrive as inline <think>...</think> spans inside plain
+# content deltas (see src/llm_core.py:1391), not only as {"thinking": true}
+# deltas. An unclosed <think> runs to end of stream. Neither counts as a
+# visible answer.
+_THINK_SPAN_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
+
+
+def strip_think_spans(text: str) -> str:
+    """Remove inline <think>...</think> reasoning spans from visible text."""
+    return _THINK_SPAN_RE.sub("", text)
+
+
+def visible_delta_from_stream(raw_text: str) -> str:
+    """Extract the concatenated visible (non-thinking) text from an SSE stream."""
+    visible = []
+    for event_type, data in parse_sse_chunks(raw_text):
+        if not isinstance(data, dict):
+            continue
+        if "delta" in data and not data.get("thinking"):
+            visible.append(data["delta"])
+    return "".join(visible)
+
+
+def any_thinking_only(raw_text: str) -> bool:
+    """Return True if the stream has thinking deltas but zero visible deltas."""
+    has_thinking = False
+    has_visible = False
+    for event_type, data in parse_sse_chunks(raw_text):
+        if not isinstance(data, dict):
+            continue
+        if "delta" in data:
+            if data.get("thinking"):
+                has_thinking = True
+            else:
+                has_visible = True
+    return has_thinking and not has_visible
+
+
+# ---------------------------------------------------------------------------
+# Session management helpers
+# ---------------------------------------------------------------------------
+
+
+def create_smoke_session(client: httpx.Client, endpoint_id: str, model: str) -> Optional[str]:
+    """Create a smoke test session. Returns session_id or None on failure."""
+    name = f"{SESSION_PREFIX}-{uuid.uuid4().hex[:8]}"
+    try:
+        r = client.post(
+            f"{BASE_URL}/api/session",
+            data={
+                "name": name,
+                "endpoint_id": endpoint_id,
+                "model": model,
+                "skip_validation": "true",
+            },
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        return r.json()["id"]
+    except Exception as e:
+        return None
+
+
+def delete_smoke_session(client: httpx.Client, session_id: str) -> None:
+    """Best-effort delete; never raises."""
+    try:
+        client.delete(f"{BASE_URL}/api/session/{session_id}", timeout=5.0)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Individual checks
+# ---------------------------------------------------------------------------
+
+
+async def check_health(timeout: float) -> CheckResult:
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{BASE_URL}/api/orchestration/health",
+                timeout=timeout,
+            )
+        latency_ms = (time.monotonic() - start) * 1000
+        if r.status_code != 200:
+            return CheckResult(
+                name="health",
+                status="fail",
+                latency_ms=latency_ms,
+                reason=f"HTTP {r.status_code}",
+            )
+        body = r.json()
+        if not body.get("healthy"):
+            return CheckResult(
+                name="health",
+                status="fail",
+                latency_ms=latency_ms,
+                reason=f"healthy=false: {json.dumps(body)[:200]}",
+                detail=body,
+            )
+        return CheckResult(
+            name="health",
+            status="pass",
+            latency_ms=latency_ms,
+            reason="healthy=true",
+            detail=body,
+        )
+    except Exception as e:
+        latency_ms = (time.monotonic() - start) * 1000
+        return CheckResult(
+            name="health",
+            status="fail",
+            latency_ms=latency_ms,
+            reason=str(e),
+        )
+
+
+async def check_route_chat(timeout: float) -> CheckResult:
+    """POST /api/route with a trivial chat task (sync=true)."""
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{BASE_URL}/api/route",
+                json={"task": SMOKE_MESSAGE, "type": "chat", "sync": True},
+                timeout=timeout,
+            )
+        latency_ms = (time.monotonic() - start) * 1000
+        if r.status_code != 200:
+            return CheckResult(
+                name="route_chat",
+                status="fail",
+                latency_ms=latency_ms,
+                reason=f"HTTP {r.status_code}: {r.text[:200]}",
+            )
+        body = r.json()
+        if body.get("error"):
+            return CheckResult(
+                name="route_chat",
+                status="fail",
+                latency_ms=latency_ms,
+                reason=f"error field set: {body.get('error_detail', body.get('error', ''))}",
+                detail=body,
+            )
+        response_text = body.get("response", "")
+        if not response_text or not str(response_text).strip():
+            return CheckResult(
+                name="route_chat",
+                status="fail",
+                latency_ms=latency_ms,
+                reason="empty response field",
+                detail=body,
+            )
+        return CheckResult(
+            name="route_chat",
+            status="pass",
+            latency_ms=latency_ms,
+            reason=f"response={str(response_text)[:80]!r}",
+            detail=body,
+        )
+    except Exception as e:
+        latency_ms = (time.monotonic() - start) * 1000
+        return CheckResult(
+            name="route_chat",
+            status="fail",
+            latency_ms=latency_ms,
+            reason=str(e),
+        )
+
+
+async def _e2e_chat_check(name: str, mode: str, timeout: float) -> CheckResult:
+    """
+    Create a throwaway session, send one message via /api/chat_stream,
+    consume the SSE response, assert a visible delta was emitted,
+    then delete the session.
+
+    Uses incognito=true so no persistent history is written.
+    The session is still created (so the server has something to attach
+    the stream to) but is cleaned up immediately after.
+    """
+    start = time.monotonic()
+    session_id: Optional[str] = None
+
+    # Read the default endpoint from settings.json for session creation.
+    # Fall back to direct tokenrouter config so the check still works even if
+    # settings.json is unavailable.
+    endpoint_id = "dd45625c"  # Tokenrouter — the app's default_endpoint_id
+    model = "MiniMax-M3"
+
+    try:
+        settings_path = Path(__file__).parent.parent / "data" / "settings.json"
+        if settings_path.exists():
+            s = json.loads(settings_path.read_text())
+            endpoint_id = s.get("default_endpoint_id", endpoint_id)
+            model = s.get("default_model", model)
+    except Exception:
+        pass
+
+    with httpx.Client() as client:
+        session_id = create_smoke_session(client, endpoint_id, model)
+        if not session_id:
+            latency_ms = (time.monotonic() - start) * 1000
+            return CheckResult(
+                name=name,
+                status="fail",
+                latency_ms=latency_ms,
+                reason="could not create smoke session",
+            )
+
+        try:
+            raw_sse = ""
+            try:
+                with client.stream(
+                    "POST",
+                    f"{BASE_URL}/api/chat_stream",
+                    data={
+                        "message": SMOKE_MESSAGE,
+                        "session": session_id,
+                        "mode": mode,
+                        "incognito": "true",
+                    },
+                    timeout=httpx.Timeout(connect=5.0, read=timeout, write=10.0, pool=5.0),
+                ) as r:
+                    if r.status_code != 200:
+                        latency_ms = (time.monotonic() - start) * 1000
+                        body_text = r.read().decode(errors="replace")
+                        return CheckResult(
+                            name=name,
+                            status="fail",
+                            latency_ms=latency_ms,
+                            reason=f"HTTP {r.status_code}: {body_text[:200]}",
+                        )
+                    for chunk in r.iter_text():
+                        raw_sse += chunk
+                        # Early exit once we have DONE
+                        if "data: [DONE]" in raw_sse:
+                            break
+            except httpx.ReadTimeout:
+                latency_ms = (time.monotonic() - start) * 1000
+                return CheckResult(
+                    name=name,
+                    status="fail",
+                    latency_ms=latency_ms,
+                    reason=f"stream timed out after {timeout:.0f}s with no [DONE]",
+                )
+            except httpx.ConnectError as e:
+                latency_ms = (time.monotonic() - start) * 1000
+                return CheckResult(
+                    name=name,
+                    status="fail",
+                    latency_ms=latency_ms,
+                    reason=f"connection error: {e}",
+                )
+
+            latency_ms = (time.monotonic() - start) * 1000
+
+            visible_raw = visible_delta_from_stream(raw_sse)
+            visible = strip_think_spans(visible_raw)
+            thinking_only = any_thinking_only(raw_sse) or (
+                visible_raw.strip() and not visible.strip()
+            )
+
+            # The app converts an empty upstream completion into a user-visible
+            # fallback string; that's the failure we exist to catch, not a pass.
+            if APP_EMPTY_RESPONSE_FALLBACK in visible:
+                return CheckResult(
+                    name=name,
+                    status="fail",
+                    latency_ms=latency_ms,
+                    reason=(
+                        "app emitted its empty-response fallback message — upstream "
+                        "model produced no answer (reasoning-model-in-agent-mode pattern)"
+                    ),
+                )
+
+            if not visible.strip():
+                if thinking_only:
+                    reason = (
+                        "no visible output (reasoning-model-in-agent-mode pattern): "
+                        "model emitted thinking deltas only, zero visible answer — "
+                        "this is the MiniMax-M3 + agent mode bug"
+                    )
+                else:
+                    reason = f"no visible delta in SSE stream (stream length {len(raw_sse)} bytes)"
+                return CheckResult(
+                    name=name,
+                    status="fail",
+                    latency_ms=latency_ms,
+                    reason=reason,
+                )
+
+            return CheckResult(
+                name=name,
+                status="pass",
+                latency_ms=latency_ms,
+                reason=f"visible reply={visible.strip()[:80]!r}",
+            )
+        finally:
+            delete_smoke_session(client, session_id)
+
+
+async def check_chat_mode_e2e(timeout: float) -> CheckResult:
+    return await _e2e_chat_check("chat_mode_e2e", "chat", timeout)
+
+
+async def check_agent_mode_e2e(timeout: float) -> CheckResult:
+    return await _e2e_chat_check("agent_mode_e2e", "agent", timeout)
+
+
+async def check_tokenrouter_upstream(timeout: float) -> CheckResult:
+    """
+    Non-streaming minimal call through the default configured endpoint.
+
+    Reads endpoint config from data/settings.json + data/app.db (read-only).
+    Skipped if config is not cleanly derivable or API key is unavailable.
+    """
+    start = time.monotonic()
+
+    try:
+        settings_path = Path(__file__).parent.parent / "data" / "settings.json"
+        if not settings_path.exists():
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason="data/settings.json not found",
+            )
+
+        settings = json.loads(settings_path.read_text())
+        endpoint_id = settings.get("default_endpoint_id", "")
+        model = settings.get("default_model", "")
+
+        if not endpoint_id or not model:
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason="no default_endpoint_id or default_model in settings.json",
+            )
+
+        # Read endpoint from DB
+        import sqlite3
+        db_path = Path(__file__).parent.parent / "data" / "app.db"
+        if not db_path.exists():
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason="data/app.db not found",
+            )
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT base_url, api_key FROM model_endpoints WHERE id=? AND is_enabled=1",
+                (endpoint_id,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason=f"endpoint {endpoint_id!r} not found or disabled in DB",
+            )
+
+        base_url, api_key = row
+        if not base_url:
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason="endpoint has empty base_url",
+            )
+
+        if not api_key:
+            # Key lives in the app's key manager, not the endpoint row — a
+            # keyless probe would 401 and report a false failure.
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="skipped",
+                latency_ms=0,
+                reason="endpoint api_key not readable from DB (managed key); skipping keyless probe",
+            )
+
+        # Build chat URL
+        chat_url = base_url.rstrip("/") + "/chat/completions"
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Say: SMOKE OK"}],
+            "stream": False,
+            "max_tokens": 20,
+        }
+
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                chat_url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+
+        latency_ms = (time.monotonic() - start) * 1000
+
+        if r.status_code not in (200, 201):
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="fail",
+                latency_ms=latency_ms,
+                reason=f"HTTP {r.status_code} from {base_url}: {r.text[:200]}",
+            )
+
+        body = r.json()
+        content = ""
+        try:
+            content = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            pass
+
+        if not content.strip():
+            return CheckResult(
+                name="tokenrouter_upstream",
+                status="fail",
+                latency_ms=latency_ms,
+                reason="empty content in response",
+                detail=body,
+            )
+
+        return CheckResult(
+            name="tokenrouter_upstream",
+            status="pass",
+            latency_ms=latency_ms,
+            reason=f"content={content.strip()[:80]!r}",
+        )
+
+    except Exception as e:
+        latency_ms = (time.monotonic() - start) * 1000
+        return CheckResult(
+            name="tokenrouter_upstream",
+            status="fail",
+            latency_ms=latency_ms,
+            reason=str(e),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+ALL_CHECKS = {
+    "health": check_health,
+    "route_chat": check_route_chat,
+    "chat_mode_e2e": check_chat_mode_e2e,
+    "agent_mode_e2e": check_agent_mode_e2e,
+    "tokenrouter_upstream": check_tokenrouter_upstream,
+}
+
+
+async def run_checks(
+    check_names: List[str],
+    timeout: float,
+) -> List[CheckResult]:
+    results = []
+    for name in check_names:
+        fn = ALL_CHECKS[name]
+        result = await fn(timeout)
+        results.append(result)
+    return results
+
+
+def write_jsonl_receipt(results: List[CheckResult]) -> None:
+    """Append one JSON line to data/orchestration/smoke.jsonl."""
+    SMOKE_JSONL.parent.mkdir(parents=True, exist_ok=True)
+    checks_dict = {
+        r.name: {
+            "status": r.status,
+            "latency_ms": round(r.latency_ms, 1),
+            "reason": r.reason,
+        }
+        for r in results
+    }
+    non_skipped = [r for r in results if r.status != "skipped"]
+    overall = (
+        "pass"
+        if all(r.status == "pass" for r in non_skipped)
+        else "fail"
+        if any(r.status == "fail" for r in non_skipped)
+        else "skipped"
+    )
+    receipt = {
+        "ts": time.time(),
+        "checks": checks_dict,
+        "overall": overall,
+    }
+    with open(SMOKE_JSONL, "a") as f:
+        f.write(json.dumps(receipt) + "\n")
+
+
+def print_table(results: List[CheckResult]) -> None:
+    COLS = ["CHECK", "STATUS", "LATENCY", "REASON"]
+    col_w = [max(len(c), max(len(r.name) for r in results)) for c in COLS]
+    col_w[0] = max(len(COLS[0]), max(len(r.name) for r in results))
+    col_w[1] = max(len(COLS[1]), 7)  # "skipped"
+    col_w[2] = max(len(COLS[2]), 10)  # "1234.5 ms"
+
+    def row(vals):
+        return "  ".join(v.ljust(w) for v, w in zip(vals, col_w))
+
+    sep = "  ".join("-" * w for w in col_w)
+
+    RESET = "\033[0m"
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    YELLOW = "\033[33m"
+    DIM = "\033[2m"
+
+    def coloured(status: str) -> str:
+        if status == "pass":
+            return GREEN + "PASS" + RESET
+        if status == "fail":
+            return RED + "FAIL" + RESET
+        return YELLOW + "SKIP" + RESET
+
+    print()
+    print(row(COLS))
+    print(sep)
+    for r in results:
+        latency = f"{r.latency_ms:.1f} ms"
+        reason = r.reason[:80]
+        plain_status = {"pass": "PASS", "fail": "FAIL", "skipped": "SKIP"}[r.status]
+        status_col = coloured(r.status)
+        # ljust on the plain version so columns stay aligned
+        padded_status = status_col + " " * max(0, col_w[1] - len(plain_status))
+        print(f"  {r.name.ljust(col_w[0])}  {padded_status}  {latency.ljust(col_w[2])}  {reason}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    global BASE_URL  # noqa: PLW0603
+
+    default_url = BASE_URL  # capture before any mutation
+
+    parser = argparse.ArgumentParser(
+        description="Smoke-test the live Odysseus server at localhost:7860.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--check",
+        metavar="NAME",
+        help=f"Run only this check. Choices: {', '.join(ALL_CHECKS)}",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Per-check timeout in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON-only output to stdout (still writes JSONL receipt)",
+    )
+    parser.add_argument(
+        "--url",
+        default=default_url,
+        help=f"Base URL of the Odysseus server (default: {default_url})",
+    )
+    args = parser.parse_args()
+
+    # Update module-level BASE_URL when --url is supplied
+    BASE_URL = args.url
+
+    if args.check:
+        if args.check not in ALL_CHECKS:
+            print(f"Unknown check {args.check!r}. Available: {', '.join(ALL_CHECKS)}", file=sys.stderr)
+            return 2
+        check_names = [args.check]
+    else:
+        check_names = list(ALL_CHECKS)
+
+    results = asyncio.run(run_checks(check_names, args.timeout))
+    write_jsonl_receipt(results)
+
+    non_skipped = [r for r in results if r.status != "skipped"]
+    overall_ok = all(r.status == "pass" for r in non_skipped)
+
+    if args.json:
+        checks_dict = {
+            r.name: {"status": r.status, "latency_ms": round(r.latency_ms, 1), "reason": r.reason}
+            for r in results
+        }
+        print(json.dumps({"overall": "pass" if overall_ok else "fail", "checks": checks_dict}, indent=2))
+    else:
+        print_table(results)
+        summary_line = "OVERALL: "
+        if overall_ok:
+            summary_line += "\033[32mPASS\033[0m"
+        else:
+            summary_line += "\033[31mFAIL\033[0m"
+        passed = sum(1 for r in non_skipped if r.status == "pass")
+        failed = sum(1 for r in non_skipped if r.status == "fail")
+        skipped = sum(1 for r in results if r.status == "skipped")
+        summary_line += f"  ({passed} passed, {failed} failed, {skipped} skipped)"
+        print(summary_line)
+        print(f"  Receipt: {SMOKE_JSONL}")
+        print()
+
+    return 0 if overall_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

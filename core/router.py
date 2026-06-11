@@ -5,9 +5,30 @@ Reads live quota data from the platform quota-core system, classifies
 incoming tasks as code / research / chat, and dispatches each to the
 cheapest suitable backend:
 
-* **code** → Claude CLI subprocess (ca, cb, cp, or claude binary)
+* **code** → CLI subprocess: claude (ca/cb) → codex → gemini (fallback chain)
 * **research** → Gemini endpoint via llm_call_async
 * **chat** → cheapest available model (MiniMax M3 preferred)
+
+CLI adapter table
+-----------------
+_CLI_ADAPTERS is the single config point for all CLI backends.  Each entry:
+  {
+    "name":        str   – logical name used in traces/logs
+    "provider_key":str   – key in quota-live.json providers dict
+    "binary":      str   – binary name (resolved via shutil.which at runtime)
+    "build_argv":  callable(binary, task) -> list[str]
+    "build_env":   callable(env) -> dict  (or None to pass env unchanged)
+    "is_exhausted":callable(prov_data) -> bool
+    "parse_output":callable(stdout, stderr, returncode) -> (response_text, session_id|None)
+    "supports_resume": bool  – True only for claude (session_id based resume)
+  }
+
+Code tasks walk the adapter table in order (claude-ca, claude-cb, codex, gemini).
+The first non-exhausted adapter with an available binary wins.
+
+NOTE: gemini CLI EOL 2026-06-18 — Antigravity migration pending.
+      To swap: update the "binary" and "build_argv" entries for the gemini
+      adapter row in _CLI_ADAPTERS below; no other code changes needed.
 """
 
 import asyncio
@@ -19,7 +40,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +63,162 @@ _CODE_TIMEOUT = 300            # subprocess timeout for code tasks
 _CLI_PRIORITY: List[Tuple[str, str, str]] = [
     ("ca", "ca", "~/.claude-a"),
     ("cb", "cb", "~/.claude-b"),
+]
+
+# ---------------------------------------------------------------------------
+# CLI adapter helpers
+# ---------------------------------------------------------------------------
+
+
+def _claude_is_exhausted(prov_data: dict) -> bool:
+    return prov_data.get("status") in ("exhausted", "rate_limited")
+
+
+def _codex_is_exhausted(prov_data: dict) -> bool:
+    # weekly_pct_remaining is a string like "10" — treat <=5 as exhausted.
+    if prov_data.get("status") in ("exhausted", "rate_limited"):
+        return True
+    try:
+        remaining = int(prov_data.get("weekly_pct_remaining", 100))
+        return remaining <= 5
+    except (TypeError, ValueError):
+        return False
+
+
+def _gemini_is_exhausted(prov_data: dict) -> bool:
+    if prov_data.get("status") in ("exhausted", "rate_limited"):
+        return True
+    # Check models dict: if any model has pct_used >= 100 we treat it as exhausted.
+    try:
+        models = prov_data.get("quotas", {}).get("models", {})
+        for _model_key, mdata in models.items():
+            pct_used = int(mdata.get("pct_used", 0))
+            if pct_used >= 100:
+                return True
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return False
+
+
+def _claude_build_argv(binary: str, task: str, config_dir: Optional[str] = None) -> List[str]:
+    """Build argv for claude: use --output-format json to capture session_id."""
+    return [binary, "--print", "--output-format", "json", "-p", task]
+
+
+def _claude_parse_output(stdout: str, stderr: str, returncode: int) -> Tuple[str, Optional[str]]:
+    """Parse claude --output-format json output.
+
+    JSON shape (verified against real run):
+      {"type":"result","subtype":"success","result":"<text>","session_id":"<uuid>", ...}
+
+    Returns (response_text, session_id).
+    """
+    stdout = stdout.strip()
+    if stdout:
+        try:
+            data = json.loads(stdout)
+            text = data.get("result") or ""
+            session_id = data.get("session_id")
+            return text, session_id
+        except json.JSONDecodeError:
+            pass
+    return stdout or stderr.strip(), None
+
+
+def _codex_build_argv(binary: str, task: str, config_dir: Optional[str] = None) -> List[str]:
+    """Build argv for codex exec (non-interactive).
+
+    `codex exec <prompt>` runs non-interactively and writes the last agent
+    message to stdout (or use --json for JSONL events).  We use plain exec
+    without --json so stdout is the final text response directly.
+    """
+    return [binary, "exec", task]
+
+
+def _codex_parse_output(stdout: str, stderr: str, returncode: int) -> Tuple[str, Optional[str]]:
+    """Codex output: plain text on stdout.  No session_id concept."""
+    return (stdout.strip() or stderr.strip()), None
+
+
+def _gemini_build_argv(binary: str, task: str, config_dir: Optional[str] = None) -> List[str]:
+    """Build argv for gemini non-interactive mode.
+
+    NOTE: gemini CLI EOL 2026-06-18.  Antigravity CLI migration pending.
+    Swap: update binary path and this function for the new CLI's flags.
+    Uses -p / --prompt flag for headless/non-interactive execution.
+    """
+    return [binary, "-p", task]
+
+
+def _gemini_parse_output(stdout: str, stderr: str, returncode: int) -> Tuple[str, Optional[str]]:
+    """Gemini output: plain text on stdout.  No session_id concept."""
+    return (stdout.strip() or stderr.strip()), None
+
+
+# ---------------------------------------------------------------------------
+# CLI adapter table — code tasks walk this list in order
+# ---------------------------------------------------------------------------
+# Each entry drives one CLI backend.  Fields:
+#   name            – logical name for traces / logs
+#   provider_key    – key into quota-live.json "providers" dict
+#   binary          – binary name for shutil.which
+#   config_dir      – CLAUDE_CONFIG_DIR value (claude only, else None)
+#   build_argv      – callable(binary, task, config_dir) -> argv list
+#   build_env       – callable(env_dict) -> env_dict  (or None = pass through)
+#   is_exhausted    – callable(provider_data_dict) -> bool
+#   parse_output    – callable(stdout, stderr, returncode) -> (text, session_id|None)
+#   supports_resume – True if the binary supports session resume (claude only)
+#
+# Code tasks prefer claude ca → cb, then codex, then gemini as last resort.
+# DO NOT silently change this order — it is the cost/quality priority.
+
+_CLI_ADAPTERS: List[Dict[str, Any]] = [
+    {
+        "name": "claude-ca",
+        "provider_key": "ca",
+        "binary": "claude",
+        "config_dir": "~/.claude-a",
+        "build_argv": _claude_build_argv,
+        "build_env": None,
+        "is_exhausted": _claude_is_exhausted,
+        "parse_output": _claude_parse_output,
+        "supports_resume": True,
+    },
+    {
+        "name": "claude-cb",
+        "provider_key": "cb",
+        "binary": "claude",
+        "config_dir": "~/.claude-b",
+        "build_argv": _claude_build_argv,
+        "build_env": None,
+        "is_exhausted": _claude_is_exhausted,
+        "parse_output": _claude_parse_output,
+        "supports_resume": True,
+    },
+    {
+        "name": "codex",
+        "provider_key": "codex",
+        "binary": "codex",
+        "config_dir": None,
+        "build_argv": _codex_build_argv,
+        "build_env": None,
+        "is_exhausted": _codex_is_exhausted,
+        "parse_output": _codex_parse_output,
+        "supports_resume": False,
+    },
+    {
+        # NOTE: gemini CLI EOL 2026-06-18 — Antigravity migration pending.
+        # To swap: change "binary" and "build_argv" here only.
+        "name": "gemini",
+        "provider_key": "gemini",
+        "binary": "gemini",
+        "config_dir": None,
+        "build_argv": _gemini_build_argv,
+        "build_env": None,
+        "is_exhausted": _gemini_is_exhausted,
+        "parse_output": _gemini_parse_output,
+        "supports_resume": False,
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -243,6 +420,10 @@ class TaskRouter:
         missing or whose quota provider is exhausted. Falls back to
         ``('default', 'claude')`` — the bare ``claude`` binary with its
         default profile.
+
+        NOTE: for multi-CLI dispatch, prefer ``select_adapter()`` which
+        walks the full _CLI_ADAPTERS table (claude → codex → gemini).
+        This method is retained for backward compatibility.
         """
         quota = self.get_quota_status()
         providers = quota.get("providers", {})
@@ -265,10 +446,52 @@ class TaskRouter:
         # Absolute fallback
         return "default", "claude"
 
+    def select_adapter(self) -> Optional[Dict[str, Any]]:
+        """Walk _CLI_ADAPTERS and return the first usable adapter dict.
+
+        An adapter is usable when:
+          1. Its binary is found on PATH.
+          2. Its config_dir exists (if specified — claude accounts only).
+          3. Its quota data does not indicate exhaustion.
+
+        Returns None only if every adapter fails all three checks (total
+        failure — the caller should emit an in-band error).
+        """
+        quota = self.get_quota_status()
+        providers = quota.get("providers", {})
+
+        for adapter in _CLI_ADAPTERS:
+            name = adapter["name"]
+            binary = shutil.which(adapter["binary"])
+            if not binary:
+                logger.debug("Skipping adapter %s — binary '%s' not on PATH", name, adapter["binary"])
+                continue
+
+            # config_dir check (claude accounts have one; others don't)
+            config_dir = adapter.get("config_dir")
+            if config_dir and not Path(config_dir).expanduser().is_dir():
+                logger.debug("Skipping adapter %s — config dir missing: %s", name, config_dir)
+                continue
+
+            prov_data = providers.get(adapter["provider_key"], {})
+            if adapter["is_exhausted"](prov_data):
+                logger.debug("Skipping adapter %s — quota exhausted", name)
+                continue
+
+            logger.debug("Selected adapter %s", name)
+            return adapter
+
+        logger.warning("No usable CLI adapter found in _CLI_ADAPTERS")
+        return None
+
     def build_code_command(self, account: str, task: str) -> Tuple[List[str], Dict[str, str]]:
-        """Build ``(argv, env)`` to run a code task as the given account."""
+        """Build ``(argv, env)`` to run a code task as the given account.
+
+        This method is retained for backward compatibility.  New code should
+        use ``build_adapter_command()`` with a full adapter dict.
+        """
         claude_bin = shutil.which("claude") or "claude"
-        argv = [claude_bin, "--print", "-p", task]
+        argv = [claude_bin, "--print", "--output-format", "json", "-p", task]
         env = {**os.environ, "CLAUDE_MODEL": os.environ.get("CLAUDE_MODEL", "sonnet")}
         config_dir = next(
             (cfg for acct, _, cfg in _CLI_PRIORITY if acct == account), None
@@ -281,22 +504,57 @@ class TaskRouter:
             env.pop("CLAUDE_CONFIG_DIR", None)
         return argv, env
 
+    def build_adapter_command(
+        self, adapter: Dict[str, Any], task: str
+    ) -> Tuple[List[str], Dict[str, str]]:
+        """Build ``(argv, env)`` for the given adapter and task."""
+        binary = shutil.which(adapter["binary"]) or adapter["binary"]
+        config_dir = adapter.get("config_dir")
+        argv = adapter["build_argv"](binary, task, config_dir)
+        env = dict(os.environ)
+        if adapter.get("build_env"):
+            env = adapter["build_env"](env)
+        if config_dir:
+            env["CLAUDE_CONFIG_DIR"] = str(Path(config_dir).expanduser())
+        elif "CLAUDE_CONFIG_DIR" in env and adapter["binary"] != "claude":
+            # Don't leak a claude config dir into non-claude binaries
+            env.pop("CLAUDE_CONFIG_DIR", None)
+        env["CLAUDE_MODEL"] = env.get("CLAUDE_MODEL", "sonnet")
+        return argv, env
+
     # ------------------------------------------------------------------
-    # Dispatch: code via subprocess
+    # Dispatch: code via subprocess (multi-CLI adapter table)
     # ------------------------------------------------------------------
 
     async def route_code(self, task: str) -> dict:
-        """Run a code task via Claude CLI subprocess.
+        """Run a code task via the best available CLI adapter.
 
-        Returns ``{response, model_used, tokens, provider}``.
+        Walks _CLI_ADAPTERS (claude-ca → claude-cb → codex → gemini),
+        selects the first non-exhausted adapter, runs it as a subprocess,
+        and returns ``{response, model_used, tokens, provider, session_id?}``.
+
+        session_id is populated for claude adapters only (--output-format json).
         """
-        account, provider = self.get_best_code_cli()
+        adapter = self.select_adapter()
         model = os.environ.get("CLAUDE_MODEL", "sonnet")
-        argv, env = self.build_code_command(account, task)
-        cli_path = argv[0]
 
-        logger.info("Routing code task via %s (account=%s, provider=%s, model=%s)",
-                    cli_path, account, provider, model)
+        if adapter is None:
+            return {
+                "response": "All CLI backends exhausted or unavailable",
+                "model_used": model,
+                "tokens": 0,
+                "provider": "none",
+                "error": True,
+            }
+
+        argv, env = self.build_adapter_command(adapter, task)
+        cli_path = argv[0]
+        provider_name = adapter["name"]
+
+        logger.info(
+            "Routing code task via adapter=%s binary=%s",
+            provider_name, cli_path,
+        )
 
         try:
             result = await asyncio.to_thread(
@@ -313,7 +571,7 @@ class TaskRouter:
                 "response": f"Task timed out after {_CODE_TIMEOUT}s",
                 "model_used": model,
                 "tokens": 0,
-                "provider": provider,
+                "provider": provider_name,
                 "error": True,
             }
         except FileNotFoundError:
@@ -322,35 +580,129 @@ class TaskRouter:
                 "response": f"CLI binary '{cli_path}' not found on PATH",
                 "model_used": model,
                 "tokens": 0,
-                "provider": provider,
+                "provider": provider_name,
                 "error": True,
             }
 
         if result.returncode != 0 and result.stderr:
-            logger.warning("CLI %s exited %d: %s", cli_path, result.returncode, result.stderr[:200])
-
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+            logger.warning(
+                "CLI %s exited %d: %s", cli_path, result.returncode, result.stderr[:200]
+            )
 
         # Non-zero exit with empty stdout: return stderr as error response
-        # rather than silently producing an empty success.
-        if result.returncode != 0 and not stdout:
-            error_text = stderr or f"CLI exited with code {result.returncode}"
+        if result.returncode != 0 and not result.stdout.strip():
+            error_text = result.stderr.strip() or f"CLI exited with code {result.returncode}"
             return {
                 "response": error_text,
                 "model_used": model,
                 "tokens": _estimate_tokens(error_text),
-                "provider": provider,
+                "provider": provider_name,
                 "error": True,
             }
 
-        response_text = stdout or stderr
-        return {
+        response_text, session_id = adapter["parse_output"](
+            result.stdout, result.stderr, result.returncode
+        )
+        out: Dict[str, Any] = {
             "response": response_text,
             "model_used": model,
             "tokens": _estimate_tokens(response_text),
-            "provider": provider,
+            "provider": provider_name,
         }
+        if session_id:
+            out["session_id"] = session_id
+        return out
+
+    async def route_code_resume(
+        self,
+        task: str,
+        session_id: str,
+        adapter_name: str,
+    ) -> dict:
+        """Resume a previous claude session via ``--resume <session_id>``.
+
+        Only claude adapters support resume.  The adapter is looked up by
+        name so the same account (config_dir) is used as the original run.
+
+        Returns the same shape as ``route_code``.
+        """
+        model = os.environ.get("CLAUDE_MODEL", "sonnet")
+
+        # Find the adapter by name
+        adapter = next(
+            (a for a in _CLI_ADAPTERS if a["name"] == adapter_name and a.get("supports_resume")),
+            None,
+        )
+        if adapter is None:
+            return {
+                "response": f"Adapter '{adapter_name}' does not support resume",
+                "model_used": model,
+                "tokens": 0,
+                "provider": adapter_name,
+                "error": True,
+            }
+
+        binary = shutil.which(adapter["binary"]) or adapter["binary"]
+        config_dir = adapter.get("config_dir")
+        argv = [binary, "--resume", session_id, "--print", "--output-format", "json", "-p", task]
+        env = dict(os.environ)
+        if config_dir:
+            env["CLAUDE_CONFIG_DIR"] = str(Path(config_dir).expanduser())
+        env["CLAUDE_MODEL"] = env.get("CLAUDE_MODEL", "sonnet")
+
+        logger.info(
+            "Resuming session %s via adapter=%s", session_id[:8], adapter_name
+        )
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_CODE_TIMEOUT,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "response": f"Resume timed out after {_CODE_TIMEOUT}s",
+                "model_used": model,
+                "tokens": 0,
+                "provider": adapter_name,
+                "error": True,
+            }
+        except FileNotFoundError:
+            return {
+                "response": f"CLI binary '{binary}' not found on PATH",
+                "model_used": model,
+                "tokens": 0,
+                "provider": adapter_name,
+                "error": True,
+            }
+
+        if result.returncode != 0 and not result.stdout.strip():
+            error_text = result.stderr.strip() or f"CLI exited with code {result.returncode}"
+            return {
+                "response": error_text,
+                "model_used": model,
+                "tokens": _estimate_tokens(error_text),
+                "provider": adapter_name,
+                "error": True,
+            }
+
+        response_text, new_session_id = adapter["parse_output"](
+            result.stdout, result.stderr, result.returncode
+        )
+        out: Dict[str, Any] = {
+            "response": response_text,
+            "model_used": model,
+            "tokens": _estimate_tokens(response_text),
+            "provider": adapter_name,
+        }
+        # The resumed session may return a new (or same) session_id
+        if new_session_id:
+            out["session_id"] = new_session_id
+        return out
 
     # ------------------------------------------------------------------
     # Dispatch: research via Gemini

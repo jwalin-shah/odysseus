@@ -281,7 +281,9 @@ class TestRouteCode:
                         router.route_code("write a hello world")
                     )
         assert result["response"] == "Generated code output"
-        assert result["provider"] == "ca"
+        # provider is now the adapter name ("claude-ca") rather than the bare
+        # provider_key ("ca") — the adapter table owns naming.
+        assert result["provider"] == "claude-ca"
         assert result["tokens"] > 0
         assert "error" not in result
 

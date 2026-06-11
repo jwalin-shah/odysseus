@@ -1,0 +1,670 @@
+#!/usr/bin/env python3
+"""agent-audit — weekly self-audit for the Odysseus orchestration layer.
+
+Stages
+------
+  collect             Read-only snapshot → JSON (stdout, or --out FILE)
+  diff SNAP_A SNAP_B  Deterministic markdown delta of two collect snapshots
+  propose             Stub: requires ~2 weeks of trace history (not yet enabled)
+
+Design constraints
+------------------
+* stdlib only (json, urllib, subprocess, statistics, pathlib).
+* Graceful on every missing input — fresh machine with no traces: valid JSON
+  with zeros/nulls, never a traceback.
+* Deterministic output: sorted keys, no random ordering, stable schema_version.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Paths — derived the same way core/orchestration_trace.py does it
+# ---------------------------------------------------------------------------
+
+# BASE_DIR = repo root (two levels up from scripts/)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+DATA_DIR = _REPO_ROOT / "data"
+TRACE_FILE = DATA_DIR / "orchestration" / "traces.jsonl"
+
+QUOTA_LIVE_PATH = Path(
+    "/Users/jwalinshah/projects/platform/systems/quota-core/data/quota-live.json"
+)
+QUOTA_STALE_SECONDS = 600
+
+ORCHESTRATION_HEALTH_URL = "http://localhost:7860/api/orchestration/health"
+HEALTH_TIMEOUT = 5  # seconds
+
+ODYSSEUS_REPO = _REPO_ROOT
+PLATFORM_REPO = Path("/Users/jwalinshah/projects/platform")
+
+SCHEMA_VERSION = "1"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _percentile(sorted_vals: List[float], pct: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    idx = min(
+        len(sorted_vals) - 1,
+        max(0, round(pct / 100 * (len(sorted_vals) - 1))),
+    )
+    return sorted_vals[idx]
+
+
+# ---------------------------------------------------------------------------
+# Trace aggregation
+# ---------------------------------------------------------------------------
+
+
+def _load_traces() -> List[Dict[str, Any]]:
+    """Parse TRACE_FILE; return list of receipts. Never raises."""
+    rows: List[Dict[str, Any]] = []
+    try:
+        with TRACE_FILE.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rows.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    return rows
+
+
+def _window_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute aggregate stats for a list of trace rows."""
+    latencies = sorted(float(r.get("latency_ms", 0)) for r in rows)
+    successes = sum(1 for r in rows if r.get("success"))
+    failures = len(rows) - successes
+    total_tokens = sum(int(r.get("tokens") or 0) for r in rows)
+
+    # Fixed cardinality: classification × model only
+    by_bucket: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        key = "{}|{}".format(
+            r.get("classification", "unknown"),
+            r.get("model_used", "unknown"),
+        )
+        b = by_bucket.setdefault(
+            key,
+            {
+                "classification": r.get("classification", "unknown"),
+                "model_used": r.get("model_used", "unknown"),
+                "count": 0,
+                "tokens": 0,
+                "failures": 0,
+            },
+        )
+        b["count"] += 1
+        b["tokens"] += int(r.get("tokens") or 0)
+        if not r.get("success"):
+            b["failures"] += 1
+
+    # Failures by classification (separate axis)
+    failures_by_classification: Dict[str, int] = {}
+    for r in rows:
+        cls = r.get("classification", "unknown")
+        if not r.get("success"):
+            failures_by_classification[cls] = (
+                failures_by_classification.get(cls, 0) + 1
+            )
+
+    return {
+        "count": len(rows),
+        "success_count": successes,
+        "failure_count": failures,
+        "success_rate": round(successes / len(rows), 4) if rows else None,
+        "latency_ms_p50": _percentile(latencies, 50),
+        "latency_ms_p95": _percentile(latencies, 95),
+        "total_tokens": total_tokens,
+        "failures_by_classification": dict(
+            sorted(failures_by_classification.items())
+        ),
+        "by_classification_model": sorted(
+            by_bucket.values(), key=lambda b: (-b["count"], b["classification"])
+        ),
+    }
+
+
+def collect_traces() -> Dict[str, Any]:
+    """Aggregate traces for last_24h and last_7d windows."""
+    rows = _load_traces()
+    now = time.time()
+    week_rows = [r for r in rows if r.get("unix", 0) >= now - 7 * 86400]
+    day_rows = [r for r in week_rows if r.get("unix", 0) >= now - 86400]
+
+    trace_file_str = str(TRACE_FILE)
+    trace_file_exists = TRACE_FILE.exists()
+    trace_total_lines = len(rows)
+
+    return {
+        "trace_file": trace_file_str,
+        "trace_file_exists": trace_file_exists,
+        "trace_total_lines": trace_total_lines,
+        "last_24h": _window_stats(day_rows),
+        "last_7d": _window_stats(week_rows),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Quota snapshot
+# ---------------------------------------------------------------------------
+
+
+def collect_quota() -> Dict[str, Any]:
+    """Read quota-live.json; return structured dict. Never raises."""
+    path = QUOTA_LIVE_PATH
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {
+            "path": str(path),
+            "exists": False,
+            "file_mtime": None,
+            "file_age_s": None,
+            "is_stale": True,
+            "data": None,
+        }
+
+    now = time.time()
+    file_age_s = round(now - mtime, 1)
+
+    data: Optional[Dict[str, Any]] = None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # Staleness: either file mtime or inner unix timestamp
+    inner_age_s: Optional[float] = None
+    if data and data.get("unix"):
+        try:
+            inner_age_s = round(now - float(data["unix"]), 1)
+        except (TypeError, ValueError):
+            pass
+
+    is_stale = file_age_s > QUOTA_STALE_SECONDS or (
+        inner_age_s is not None and inner_age_s > QUOTA_STALE_SECONDS
+    )
+
+    return {
+        "path": str(path),
+        "exists": True,
+        "file_mtime": round(mtime, 3),
+        "file_age_s": file_age_s,
+        "inner_age_s": inner_age_s,
+        "is_stale": is_stale,
+        "stale_threshold_s": QUOTA_STALE_SECONDS,
+        "data": data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
+
+
+def collect_health() -> Dict[str, Any]:
+    """GET /api/orchestration/health with short timeout. Never raises."""
+    try:
+        with urllib.request.urlopen(
+            ORCHESTRATION_HEALTH_URL, timeout=HEALTH_TIMEOUT
+        ) as resp:
+            body = resp.read().decode("utf-8")
+            return {
+                "reachable": True,
+                "status_code": resp.status,
+                "data": json.loads(body) if body else None,
+            }
+    except urllib.error.HTTPError as exc:
+        return {
+            "reachable": True,
+            "status_code": exc.code,
+            "error": str(exc),
+            "data": None,
+        }
+    except Exception as exc:
+        return {
+            "reachable": False,
+            "error": str(exc)[:200],
+            "data": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Git status
+# ---------------------------------------------------------------------------
+
+
+def _git_status(repo_path: Path) -> Dict[str, Any]:
+    """Porcelain status + last commit for a repo. Never raises."""
+    base: Dict[str, Any] = {
+        "path": str(repo_path),
+        "exists": repo_path.is_dir(),
+        "branch": None,
+        "dirty_file_count": None,
+        "last_commit_subject": None,
+        "last_commit_hash": None,
+        "error": None,
+    }
+    if not base["exists"]:
+        base["error"] = "directory not found"
+        return base
+
+    def _run(cmd: List[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    try:
+        # Branch
+        r = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if r.returncode == 0:
+            base["branch"] = r.stdout.strip()
+
+        # Dirty file count (porcelain v1: non-empty lines)
+        r = _run(["git", "status", "--porcelain"])
+        if r.returncode == 0:
+            dirty_lines = [l for l in r.stdout.splitlines() if l.strip()]
+            base["dirty_file_count"] = len(dirty_lines)
+
+        # Last commit
+        r = _run(["git", "log", "-1", "--pretty=format:%h %s"])
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split(" ", 1)
+            base["last_commit_hash"] = parts[0]
+            base["last_commit_subject"] = parts[1] if len(parts) > 1 else ""
+
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        base["error"] = str(exc)[:200]
+
+    return base
+
+
+def collect_git() -> Dict[str, Any]:
+    return {
+        "odysseus": _git_status(ODYSSEUS_REPO),
+        "platform": _git_status(PLATFORM_REPO),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Top-level collect
+# ---------------------------------------------------------------------------
+
+
+def cmd_collect(out_path: Optional[str]) -> None:
+    """Stage 1: produce a deterministic JSON snapshot."""
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_ts": _now_utc(),
+        "traces": collect_traces(),
+        "quota": collect_quota(),
+        "health": collect_health(),
+        "git": collect_git(),
+    }
+    text = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+    if out_path:
+        Path(out_path).write_text(text, encoding="utf-8")
+        print(f"Snapshot written to {out_path}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+
+
+# ---------------------------------------------------------------------------
+# Diff helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_snap(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _rate_delta(label: str, a: Optional[float], b: Optional[float]) -> Optional[str]:
+    """Return a markdown line if there's a meaningful rate change."""
+    if a is None or b is None:
+        return None
+    delta = round(b - a, 4)
+    if delta == 0:
+        return None
+    direction = "improved" if delta > 0 else "worsened"
+    sign = "+" if delta > 0 else ""
+    return f"- **{label}**: {direction} ({sign}{delta:.4f}; {a:.4f} → {b:.4f})"
+
+
+def _int_delta(label: str, a: Optional[int], b: Optional[int], higher_is_worse: bool = True) -> Optional[str]:
+    if a is None or b is None:
+        return None
+    delta = (b or 0) - (a or 0)
+    if delta == 0:
+        return None
+    if higher_is_worse:
+        direction = "worsened" if delta > 0 else "improved"
+    else:
+        direction = "improved" if delta > 0 else "worsened"
+    sign = "+" if delta > 0 else ""
+    return f"- **{label}**: {direction} ({sign}{delta}; {a} → {b})"
+
+
+def _float_delta(label: str, a: Optional[float], b: Optional[float], higher_is_worse: bool = True) -> Optional[str]:
+    if a is None or b is None:
+        return None
+    delta = round((b or 0.0) - (a or 0.0), 2)
+    if delta == 0:
+        return None
+    if higher_is_worse:
+        direction = "worsened" if delta > 0 else "improved"
+    else:
+        direction = "improved" if delta > 0 else "worsened"
+    sign = "+" if delta > 0 else ""
+    return f"- **{label}**: {direction} ({sign}{delta:.2f}; {a:.2f} → {b:.2f})"
+
+
+def cmd_diff(snap_a_path: str, snap_b_path: str) -> None:
+    """Stage 2: deterministic markdown delta of two collect snapshots."""
+    try:
+        snap_a = _load_snap(snap_a_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"ERROR: cannot read {snap_a_path}: {exc}")
+        sys.exit(0)
+
+    try:
+        snap_b = _load_snap(snap_b_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"ERROR: cannot read {snap_b_path}: {exc}")
+        sys.exit(0)
+
+    lines: List[str] = []
+
+    lines.append("# Agent Audit Diff")
+    lines.append("")
+    lines.append(f"**Snapshot A:** `{snap_a_path}` — {snap_a.get('snapshot_ts', 'unknown')}")
+    lines.append(f"**Snapshot B:** `{snap_b_path}` — {snap_b.get('snapshot_ts', 'unknown')}")
+    lines.append("")
+
+    # --- Orchestration traces ---
+    lines.append("## Orchestration Traces")
+    lines.append("")
+    for window in ("last_24h", "last_7d"):
+        a_w = (snap_a.get("traces") or {}).get(window) or {}
+        b_w = (snap_b.get("traces") or {}).get(window) or {}
+        changes: List[str] = []
+
+        d = _rate_delta(
+            f"{window} success_rate",
+            a_w.get("success_rate"),
+            b_w.get("success_rate"),
+        )
+        if d:
+            changes.append(d)
+
+        d = _int_delta(
+            f"{window} failure_count",
+            a_w.get("failure_count"),
+            b_w.get("failure_count"),
+            higher_is_worse=True,
+        )
+        if d:
+            changes.append(d)
+
+        d = _float_delta(
+            f"{window} latency_ms_p50",
+            a_w.get("latency_ms_p50"),
+            b_w.get("latency_ms_p50"),
+            higher_is_worse=True,
+        )
+        if d:
+            changes.append(d)
+
+        d = _float_delta(
+            f"{window} latency_ms_p95",
+            a_w.get("latency_ms_p95"),
+            b_w.get("latency_ms_p95"),
+            higher_is_worse=True,
+        )
+        if d:
+            changes.append(d)
+
+        d = _int_delta(
+            f"{window} total_tokens",
+            a_w.get("total_tokens"),
+            b_w.get("total_tokens"),
+            higher_is_worse=False,
+        )
+        if d:
+            changes.append(d)
+
+        d = _int_delta(
+            f"{window} dispatch_count",
+            a_w.get("count"),
+            b_w.get("count"),
+            higher_is_worse=False,
+        )
+        if d:
+            changes.append(d)
+
+        if changes:
+            lines.extend(changes)
+        else:
+            lines.append(f"- {window}: no change in key metrics")
+
+    # New / gone classifications
+    a_classes = {
+        b["classification"]
+        for b in (snap_a.get("traces") or {}).get("last_7d", {}).get("by_classification_model") or []
+    }
+    b_classes = {
+        b["classification"]
+        for b in (snap_b.get("traces") or {}).get("last_7d", {}).get("by_classification_model") or []
+    }
+    new_classes = sorted(b_classes - a_classes)
+    gone_classes = sorted(a_classes - b_classes)
+    if new_classes:
+        lines.append(f"- New classifications in B: {', '.join(new_classes)}")
+    if gone_classes:
+        lines.append(f"- Gone classifications from A: {', '.join(gone_classes)}")
+
+    lines.append("")
+
+    # --- Quota ---
+    lines.append("## Quota")
+    lines.append("")
+    a_q = snap_a.get("quota") or {}
+    b_q = snap_b.get("quota") or {}
+
+    a_stale = a_q.get("is_stale")
+    b_stale = b_q.get("is_stale")
+    if a_stale != b_stale:
+        if b_stale:
+            lines.append("- **quota**: freshness worsened (now stale)")
+        else:
+            lines.append("- **quota**: freshness improved (no longer stale)")
+    else:
+        lines.append(f"- quota stale: {b_stale} (unchanged)")
+
+    d = _float_delta(
+        "quota file_age_s",
+        a_q.get("file_age_s"),
+        b_q.get("file_age_s"),
+        higher_is_worse=True,
+    )
+    if d:
+        lines.append(d)
+
+    lines.append("")
+
+    # --- Health ---
+    lines.append("## Orchestration Health")
+    lines.append("")
+    a_h = (snap_a.get("health") or {}).get("data") or {}
+    b_h = (snap_b.get("health") or {}).get("data") or {}
+    a_reach = (snap_a.get("health") or {}).get("reachable", False)
+    b_reach = (snap_b.get("health") or {}).get("reachable", False)
+
+    if a_reach != b_reach:
+        if b_reach:
+            lines.append("- **health endpoint**: improved (now reachable)")
+        else:
+            lines.append("- **health endpoint**: worsened (no longer reachable)")
+    else:
+        lines.append(f"- health endpoint reachable: {b_reach} (unchanged)")
+
+    a_healthy = a_h.get("healthy")
+    b_healthy = b_h.get("healthy")
+    if a_healthy != b_healthy:
+        if b_healthy:
+            lines.append("- **health status**: improved (healthy)")
+        else:
+            lines.append("- **health status**: worsened (unhealthy)")
+
+    d = _int_delta(
+        "consecutive_failures",
+        a_h.get("consecutive_failures"),
+        b_h.get("consecutive_failures"),
+        higher_is_worse=True,
+    )
+    if d:
+        lines.append(d)
+
+    lines.append("")
+
+    # --- Git ---
+    lines.append("## Git State")
+    lines.append("")
+    for repo in ("odysseus", "platform"):
+        a_g = (snap_a.get("git") or {}).get(repo) or {}
+        b_g = (snap_b.get("git") or {}).get(repo) or {}
+
+        d = _int_delta(
+            f"{repo} dirty_file_count",
+            a_g.get("dirty_file_count"),
+            b_g.get("dirty_file_count"),
+            higher_is_worse=True,
+        )
+        if d:
+            lines.append(d)
+
+        a_commit = a_g.get("last_commit_subject") or ""
+        b_commit = b_g.get("last_commit_subject") or ""
+        if a_commit != b_commit:
+            lines.append(f"- **{repo} last commit**: changed")
+            if a_commit:
+                lines.append(f"  - was: `{a_commit}`")
+            if b_commit:
+                lines.append(f"  - now: `{b_commit}`")
+
+        a_branch = a_g.get("branch")
+        b_branch = b_g.get("branch")
+        if a_branch != b_branch:
+            lines.append(f"- **{repo} branch**: {a_branch} → {b_branch}")
+
+    lines.append("")
+    print("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Propose stub
+# ---------------------------------------------------------------------------
+
+
+def cmd_propose() -> None:
+    """Stage 3 stub: deferred until ~2 weeks of trace history exists."""
+    msg = (
+        "agent-audit propose: NOT YET ENABLED\n"
+        "\n"
+        "The 'propose' stage uses an LLM to generate an improvement backlog\n"
+        "from trace, quota, and git data. It requires approximately 2 weeks\n"
+        "of orchestration trace history to produce meaningful recommendations.\n"
+        "\n"
+        "Current trace file: {trace_file}\n"
+        "Run 'agent-audit collect' to check trace volume before re-enabling.\n"
+    ).format(trace_file=TRACE_FILE)
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="agent-audit",
+        description="Weekly self-audit for the Odysseus orchestration layer.",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    collect_p = sub.add_parser(
+        "collect",
+        help="Read-only snapshot → JSON (stdout, or --out FILE)",
+    )
+    collect_p.add_argument(
+        "--out", metavar="FILE", default=None,
+        help="Write snapshot JSON to FILE instead of stdout",
+    )
+
+    diff_p = sub.add_parser(
+        "diff",
+        help="Deterministic markdown delta of two collect snapshots",
+    )
+    diff_p.add_argument("snap_a", metavar="SNAP_A")
+    diff_p.add_argument("snap_b", metavar="SNAP_B")
+
+    sub.add_parser(
+        "propose",
+        help="(stub) LLM improvement-backlog — requires ~2 weeks of traces",
+    )
+
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "collect":
+        cmd_collect(args.out)
+    elif args.command == "diff":
+        cmd_diff(args.snap_a, args.snap_b)
+    elif args.command == "propose":
+        cmd_propose()
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
