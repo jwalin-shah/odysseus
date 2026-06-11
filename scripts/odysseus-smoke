@@ -654,6 +654,21 @@ def print_table(results: List[CheckResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _notify_failure(failed_names: list) -> None:
+    """Best-effort macOS notification so scheduled (launchd) failures surface
+    without anyone reading logs. Never raises."""
+    try:
+        import subprocess
+        msg = "Failed: " + ", ".join(failed_names)[:120]
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{msg}" with title "odysseus-smoke FAIL"'],
+            timeout=5, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def main() -> int:
     global BASE_URL  # noqa: PLW0603
 
@@ -702,6 +717,9 @@ def main() -> int:
 
     non_skipped = [r for r in results if r.status != "skipped"]
     overall_ok = all(r.status == "pass" for r in non_skipped)
+
+    if not overall_ok:
+        _notify_failure([r.name for r in non_skipped if r.status == "fail"])
 
     if args.json:
         checks_dict = {
