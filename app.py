@@ -719,6 +719,19 @@ app.include_router(setup_claude_routes())
 from routes.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
 
+# Brain dump ingestion + cached context prefix (knowledge-base/)
+from routes.brain_routes import setup_brain_routes
+app.include_router(setup_brain_routes())
+
+# Intelligent task routing (quota-aware code/research/chat dispatch).
+# Order matters: orchestration_routes owns POST /api/route (traced, in-band
+# errors); route_dispatch keeps only GET /api/route/status. Starlette matches
+# in registration order, so the traced dispatcher must mount first.
+from routes.orchestration_routes import setup_orchestration_routes
+app.include_router(setup_orchestration_routes())
+from routes.route_dispatch import setup_route_dispatch
+app.include_router(setup_route_dispatch())
+
 # Contacts (CardDAV)
 from routes.contacts_routes import setup_contacts_routes
 app.include_router(setup_contacts_routes())
