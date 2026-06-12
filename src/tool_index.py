@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # These are the most commonly needed and should never be missing.
 ALWAYS_AVAILABLE = frozenset({
     "bash", "python", "web_search", "web_fetch",
+    # Mission dispatch is the orchestrator's core capability — never let the
+    # RAG selector hide it (embeddings can be down or rank it poorly).
+    "dispatch_mission", "list_missions",
     # File tools: read AND write/edit. An agent with disk access should always
     # be able to change files, not just read them — otherwise a bare "edit X"
     # request can miss write_file/edit_file (RAG-only) and the model wrongly
