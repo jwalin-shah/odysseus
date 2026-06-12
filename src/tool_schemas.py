@@ -1161,6 +1161,38 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "tla_chat",
+            "description": "Send a one-off message to a specific coding/analysis agent and return its response. No worktree, no test gate — just a direct chat. Use for 'ask claude', 'have m3 review this', 'send a prompt to ca', 'what does codex think of X'. NOT for code work that needs a worktree or test gate (use dispatch_mission).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name: claude, ca, cb, cc, codex, gemini, agy, m3, or opencode-opus"},
+                    "message": {"type": "string", "description": "Message/prompt to send to the agent"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 300)"}
+                },
+                "required": ["agent", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tla_quota",
+            "description": "Read the canonical subscription-agent quota status from /Users/jwalinshath/bin/quota. Returns JSON for claude-a, claude-b, pioneer, codex, cursor, gemini, agy. Use before a flood of dispatches to know which agents still have budget, or to debug a 'no verified source' message in the live quota output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Optional: filter to a single provider name"},
+                    "include_agy": {"type": "boolean", "description": "Include agy (visual capture) — default true"},
+                    "quota_bin": {"type": "string", "description": "Override path to quota binary"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "mark_email_read",
             "description": "Mark one email as read or unread by UID. For multiple messages, use bulk_email instead. Always pass account when the email came from a named account such as Gmail.",
             "parameters": {
@@ -1354,7 +1386,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
                         "manage_tokens", "manage_documents", "manage_settings",
-                        "dispatch_mission", "list_missions", "supervise_missions"):
+                        "dispatch_mission", "list_missions", "supervise_missions",
+                        "tla_chat", "tla_quota"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

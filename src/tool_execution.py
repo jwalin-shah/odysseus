@@ -1127,6 +1127,7 @@ async def execute_tool_block(
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
         do_dispatch_mission, do_list_missions, do_supervise_missions,
+        do_tla_chat, do_tla_quota,
     )
 
     tool = block.tool_type
@@ -1354,6 +1355,12 @@ async def execute_tool_block(
     elif tool == "supervise_missions":
         desc = "supervise_missions"
         result = await do_supervise_missions(content, owner=owner)
+    elif tool == "tla_chat":
+        desc = "tla_chat"
+        result = await do_tla_chat(content, owner=owner)
+    elif tool == "tla_quota":
+        desc = "tla_quota"
+        result = await do_tla_quota(content, owner=owner)
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()
