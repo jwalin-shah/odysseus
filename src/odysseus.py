@@ -357,13 +357,23 @@ def do_code(mission, args, docs):
                        check=True, capture_output=True)
         try:
             t0 = time.time()
-            rc, out, err = hybrid_patch(wt, args.hybrid, mission)
-            dur = time.time() - t0
-            passed = False
-            if rc == 0:
-                test = subprocess.run(args.test, shell=True, cwd=wt, capture_output=True,
-                                      text=True, timeout=600)
+            passed, rc, err = False, 1, ""
+            goal = mission
+            for attempt in range(3):  # M3 self-corrects on gate feedback (free)
+                rc, out, err = hybrid_patch(wt, args.hybrid, goal)
+                if rc != 0:
+                    break
+                test = subprocess.run(args.test, shell=True, cwd=wt,
+                                      capture_output=True, text=True, timeout=600)
                 passed = test.returncode == 0
+                if passed:
+                    break
+                goal = (f"{mission}\n\nYour previous attempt failed the gate "
+                        f"`{args.test}` with:\n{(test.stdout + test.stderr)[-1500:]}\n"
+                        "Fix the function properly this time.")
+                print(f"[ody] hybrid attempt {attempt + 1} red; retrying with "
+                      "gate feedback", file=sys.stderr)
+            dur = time.time() - t0
             if passed:
                 subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
                 subprocess.run(["git", "-C", wt, "commit", "-m",
