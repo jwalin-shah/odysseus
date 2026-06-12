@@ -1,0 +1,19 @@
+{
+  "_doc": "task_hash policy contract. Decided 2026-06-11 per FABLE_BLUEPRINT F6. IRREVERSIBLE: any change to hash_inputs requires a corpus re-hash of exchanges/. Per MR-OD-029/030/031/032.",
+  "hash_inputs": ["task", "prompt_type", "model"],
+  "dedup_mode": "first_wins",
+  "rationale": "Semantic-hash chosen as the default. Content-hash alone inflated the corpus 6x (6 importers in llm_call_async share the same quoted email). Intent-hash leaks caller identity and requires documentation we don't yet have. Semantic-hash preserves the routing signal (per-model cost/training) without leaking caller. dedup_mode=first_wins because storage cost dominates and correction-mining wants the earliest stable signal; if a different mode proves better at scale, that is a 1-PR spec change plus a corpus re-hash.",
+  "prompt_types": [
+    "chat", "scheduler", "research", "notes", "email",
+    "summaries", "agent", "code", "research-helper", "custom"
+  ],
+  "call_sites": [
+    "src/llm_core.py:llm_call_async (28 importers sharing one site)",
+    "core/router.py:route_code (subprocess path)"
+  ],
+  "compute_task_hash_signature": "compute_task_hash(task: str, prompt_type: str, model: str, caller: str, session_id: str) -> str",
+  "ignore_undeclared_inputs": true,
+  "test_gate": "tests/test_task_hash_policy_exists.py + tests/test_task_hash_dedup_policy.py + tests/test_exchange_export_dedup.py",
+  "supersedes": null,
+  "decided_by": "odysseus audit 2026-06-11 + FABLE_BLUEPRINT F6 + insight_bg-github-harvester_1781220443.md + insight_bg-github-harvester_1781226957.md"
+}

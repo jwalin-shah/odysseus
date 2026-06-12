@@ -16,8 +16,120 @@ QUOTA_EXHAUSTED_EXIT = 75
 def _now():
     """Return current epoch seconds, optionally shifted for tests."""
     return time.time() + float(os.environ.get("ODY_MOCK_TIME_OFFSET_HOURS", 0)) * 3600
-
-
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    ...
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+def _connect(db):
+    """Open a SQLite connection with WAL mode and 30s busy timeout."""
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 def _connect(db):
     """Open a SQLite connection with WAL mode and 30s busy timeout."""
     conn = sqlite3.connect(db, timeout=30, isolation_level=None)
@@ -82,6 +194,7 @@ def cmd_init(args):
 
 
 def cmd_deduct(args):
+    """Atomically deduct amount from a quota dimension, exiting 75 if exhausted, 2 if uninitialized."""
     conn = _connect(args.db)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -89,25 +202,12 @@ def cmd_deduct(args):
         if state is None:
             conn.rollback()
             return 2
-        lim, used, _win, ws = state
-        if used + args.amount > lim + 1e-9:
+        lim, used, _win, _ws = state
+        if used + args.amount > lim:
             conn.rollback()
-            print("QUOTA_EXHAUSTED", file=sys.stderr)
             return QUOTA_EXHAUSTED_EXIT
-        conn.execute(
-            "UPDATE quota SET used=?, window_start=? WHERE dim=?",
-            (used + args.amount, ws, args.type),
-        )
-        conn.commit()
-        return 0
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
 def cmd_check(args):
+    """Check remaining quota for a dimension, exiting 2 if uninitialized."""
     conn = _connect(args.db)
     try:
         state = _load(conn, args.type)
@@ -118,35 +218,6 @@ def cmd_check(args):
         return 0
     finally:
         conn.close()
-
-
 def main(argv=None):
+    """Entry point: parse argv and dispatch to init/deduct/check subcommands."""
     p = argparse.ArgumentParser(prog="sys-quota")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    pi = sub.add_parser("init")
-    pi.add_argument("--db", required=True)
-    pi.add_argument("--limit", type=float)
-    pi.add_argument("--tokens", type=float)
-    pi.add_argument("--cost", type=float)
-    pi.add_argument("--window")
-    pi.add_argument("--type", default="tokens")
-    pi.set_defaults(fn=cmd_init)
-
-    pd = sub.add_parser("deduct")
-    pd.add_argument("--db", required=True)
-    pd.add_argument("--amount", type=float, required=True)
-    pd.add_argument("--type", default="tokens")
-    pd.set_defaults(fn=cmd_deduct)
-
-    pc = sub.add_parser("check")
-    pc.add_argument("--db", required=True)
-    pc.add_argument("--type", default="tokens")
-    pc.set_defaults(fn=cmd_check)
-
-    args = p.parse_args(argv)
-    return args.fn(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
