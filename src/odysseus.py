@@ -53,13 +53,17 @@ REGISTRY = {
     "cb":            {"argv": ["opencode", "run", "-m", "pioneer/claude-sonnet-4-6", "{prompt}"], "kind": "coder"},
     "cc":            {"argv": ["opencode", "run", "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
     # codex refuses to run outside a trusted git repo; --skip-git-repo-check
-    # lets it run anywhere, which is what we need for worktree dispatches.
-    "codex":         {"argv": ["codex", "exec", "--skip-git-repo-check", "{prompt}"], "kind": "coder"},
+    # lets it run anywhere. We route through Pioneer (matching ca/cb/cc)
+    # so the ChatGPT plan model restrictions don't bite us.
+    "codex":         {"argv": ["codex", "exec", "--skip-git-repo-check",
+                               "-c", "model_provider=pioneer",
+                               "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
     "opencode-m3":   {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst"},
     "m3":            {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst", "alias_of": "opencode-m3"},
     # gemini refuses to run outside a trusted directory; --skip-trust
-    # lets it run anywhere.
-    "gemini":        {"argv": ["gemini", "-p", "--skip-trust", "{prompt}"], "kind": "analyst"},
+    # lets it run anywhere. Note: --skip-trust must come BEFORE -p, otherwise
+    # gemini treats the next arg as the -p value, not a flag.
+    "gemini":        {"argv": ["gemini", "--skip-trust", "-p", "{prompt}"], "kind": "analyst"},
     "cursor-agent":  {"argv": ["cursor-agent", "-p", "{prompt}"], "kind": "coder"},
     "agy":           {"argv": ["agy", "-p", "{prompt}"], "kind": "analyst"},
 }
@@ -231,7 +235,7 @@ def run_agent(agent, prompt, cwd=None, timeout=180):
         (p.format(prompt=prompt) if p == "{prompt}" else p)
         for p in template[1:]
     ]
-    env = pioneer_env() if argv[0] == "opencode" else None
+    env = pioneer_env() if argv[0] in ("opencode", "codex") else None
     t0 = time.time()
     try:
         p = subprocess.run(argv, cwd=cwd or ODY_HOME, capture_output=True,
