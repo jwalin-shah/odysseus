@@ -239,10 +239,14 @@ def do_analyze(mission, args, docs):
         try:
             import m3
             t0 = time.time()
-            out = m3.complete(prompt, timeout=args.timeout)
+            out = m3.complete(prompt, max_tokens=8192, timeout=args.timeout)
+            answer = out.split("</think>")[-1].strip()
             print(out)
-            return {"agent_used": "m3-direct", "result": "ok", "test_passed": None,
-                    "duration": round(time.time() - t0, 1), "output": out[:2000]}
+            # exit-0 with an empty post-think payload is NOT ok (M3 can burn
+            # its whole budget reasoning) — grade honestly so the router learns
+            result = "ok" if answer else "empty_output"
+            return {"agent_used": "m3-direct", "result": result, "test_passed": None,
+                    "duration": round(time.time() - t0, 1), "output": answer[:2000]}
         except Exception as e:
             print(f"[ody] m3-direct failed ({e}); falling back", file=sys.stderr)
     tool = args.tool or pick(ANALYZE_WATERFALL)
