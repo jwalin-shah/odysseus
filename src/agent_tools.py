@@ -61,7 +61,9 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # there's no named tool wrapper for the action.
              "app_api",
              # Odysseus mission tools
-             "dispatch_mission", "list_missions", "supervise_missions"}
+             "dispatch_mission", "list_missions", "supervise_missions",
+             # Per-agent direct chat + canonical quota (no worktree, no test gate)
+             "tla_chat", "tla_quota"}
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 
