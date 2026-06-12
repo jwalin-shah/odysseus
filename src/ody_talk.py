@@ -72,15 +72,44 @@ def talk(message, sid):
     print()
 
 
+def repl(sid):
+    try:
+        import readline  # noqa: F401  (arrow keys / history)
+    except ImportError:
+        pass
+    print("[ody talk] interactive — /new = fresh session, /quit or Ctrl-D to exit")
+    while True:
+        try:
+            msg = input("\nyou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not msg:
+            continue
+        if msg in ("/quit", "/exit", "q"):
+            return 0
+        if msg == "/new":
+            sid = get_session(new=True)
+            print("[ody talk] new session")
+            continue
+        try:
+            talk(msg, sid)
+        except Exception as e:
+            print(f"[ody talk] error: {e} (is the app up? try: ody status)",
+                  file=sys.stderr)
+
+
 def main(argv=None):
     args = list(argv if argv is not None else sys.argv[1:])
     new = "--new" in args
     if new:
         args.remove("--new")
+    sid = get_session(new=new)
     if not args:
+        if sys.stdin.isatty():
+            return repl(sid)
         print(__doc__)
         return 1
-    sid = get_session(new=new)
     talk(" ".join(args), sid)
     return 0
 
