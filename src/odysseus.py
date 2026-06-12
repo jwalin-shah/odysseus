@@ -303,7 +303,43 @@ def hybrid_patch(wt, spec, mission):
     return 0, f"spliced {func} in {rel}", ""
 
 
+def derive_hybrid_spec(mission, repo):
+    """Ask M3 (free) to name the FILE:FUNC a mission targets, so the hybrid
+    splice can be attempted before any paid coder. Returns spec or None."""
+    try:
+        import m3
+        listing = subprocess.run(
+            ["git", "-C", repo, "ls-files", "*.py"],
+            capture_output=True, text=True, timeout=15).stdout[:4000]
+        out = m3.complete(
+            f"<files>\n{listing}\n</files>\n\nMission: {mission}\n\n"
+            "If this mission is a fix scoped to ONE function in ONE of these "
+            "files, reply with exactly FILE.py:function_name and nothing else. "
+            "Otherwise reply NO.", system="You are a precise code locator.",
+            max_tokens=600, timeout=60)
+        if "</think>" in out:
+            out = out.split("</think>")[-1]
+        spec = out.strip().splitlines()[-1].strip()
+        if spec != "NO" and ":" in spec and spec.split(":")[0].endswith(".py"):
+            return spec
+    except Exception:
+        pass
+    return None
+
+
 def do_code(mission, args, docs):
+    if not args.hybrid and not args.tool and not args.dry_run:
+        # cheap-first default: try the free M3 splice before any paid coder
+        spec = derive_hybrid_spec(mission, os.path.abspath(args.repo))
+        if spec:
+            print(f"[ody] cheap-first: trying m3-hybrid on {spec}", file=sys.stderr)
+            args.hybrid = spec
+            rec = do_code(mission, args, docs)
+            if rec.get("test_passed"):
+                return rec
+            args.hybrid = None
+            print("[ody] hybrid failed; escalating to coder waterfall",
+                  file=sys.stderr)
     if args.hybrid:
         tool = "m3-hybrid"
     else:
