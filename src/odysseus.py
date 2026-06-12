@@ -47,14 +47,24 @@ REGISTRY = {
     # pytest gate; red = discarded
     "claude":        {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
     "opencode-opus": {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder"},
-    "codex":         {"argv": ["codex", "exec", "{prompt}"], "kind": "coder"},
+    # Short aliases: ca = claude opus (best), cb = claude sonnet (mid), cc = haiku (fast).
+    # All three go through OpenCode+Pioneer so they share one API key and quota bucket.
+    "ca":            {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder", "alias_of": "opencode-opus"},
+    "cb":            {"argv": ["opencode", "run", "-m", "pioneer/claude-sonnet-4-6", "{prompt}"], "kind": "coder"},
+    "cc":            {"argv": ["opencode", "run", "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
+    # codex refuses to run outside a trusted git repo; --skip-git-repo-check
+    # lets it run anywhere, which is what we need for worktree dispatches.
+    "codex":         {"argv": ["codex", "exec", "--skip-git-repo-check", "{prompt}"], "kind": "coder"},
     "opencode-m3":   {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst"},
-    "gemini":        {"argv": ["gemini", "-p", "{prompt}"], "kind": "analyst"},
+    "m3":            {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst", "alias_of": "opencode-m3"},
+    # gemini refuses to run outside a trusted directory; --skip-trust
+    # lets it run anywhere.
+    "gemini":        {"argv": ["gemini", "-p", "--skip-trust", "{prompt}"], "kind": "analyst"},
     "cursor-agent":  {"argv": ["cursor-agent", "-p", "{prompt}"], "kind": "coder"},
     "agy":           {"argv": ["agy", "-p", "{prompt}"], "kind": "analyst"},
 }
 
-CODE_WATERFALL = ["claude", "opencode-opus", "codex"]
+CODE_WATERFALL = ["claude", "ca", "cb", "codex"]
 ANALYZE_WATERFALL = ["opencode-m3", "gemini"]
 
 CODE_WORDS = ("fix", "implement", "refactor", "rewrite", "add ", "patch",
@@ -109,8 +119,10 @@ def cli_exists(tool):
 
 
 # daily call budgets per tool; deducted 1 per dispatch
-QUOTA_LIMITS = {"claude": 300, "opencode-opus": 100, "codex": 200,
-                "opencode-m3": 2000, "m3-direct": 2000, "m3-hybrid": 2000,
+# Aliases (ca, cb, cc, m3) share quota with their canonical name.
+QUOTA_LIMITS = {"claude": 300, "opencode-opus": 100, "ca": 100, "cb": 200, "cc": 400,
+                "codex": 200,
+                "opencode-m3": 2000, "m3": 2000, "m3-direct": 2000, "m3-hybrid": 2000,
                 "gemini": 200, "cursor-agent": 100, "agy": 200}
 
 
@@ -197,6 +209,33 @@ def run_tool(tool, prompt, cwd, timeout):
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
                            timeout=timeout, env=env)
+        return p.returncode, p.stdout, p.stderr, time.time() - t0
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout}s", time.time() - t0
+
+
+def run_agent(agent, prompt, cwd=None, timeout=180):
+    """Run a single agent CLI with a prompt. Returns (rc, stdout, stderr, dur).
+
+    Recognised agents: claude, ca, cb, cc, codex, gemini, agy, opencode-m3,
+    m3, opencode-opus, cursor-agent. Looks the agent up in REGISTRY,
+    substitutes the prompt, sets up the right env (Pioneer API key for
+    opencode-launched agents), and runs.
+    """
+    if agent not in REGISTRY:
+        raise ValueError(
+            f"unknown agent {agent!r}; known: {sorted(REGISTRY)}"
+        )
+    template = REGISTRY[agent]["argv"]
+    argv = [template[0]] + [
+        (p.format(prompt=prompt) if p == "{prompt}" else p)
+        for p in template[1:]
+    ]
+    env = pioneer_env() if argv[0] == "opencode" else None
+    t0 = time.time()
+    try:
+        p = subprocess.run(argv, cwd=cwd or ODY_HOME, capture_output=True,
+                           text=True, timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr, time.time() - t0
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s", time.time() - t0
