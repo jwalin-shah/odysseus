@@ -136,53 +136,124 @@ def remove_worktree(wtpath: str):
 # --- M3 RESPONSE PARSING ---
 
 def parse_m3_response(response_text: str) -> Optional[Dict[str, Any]]:
-    """Parse M3 response into Aider SEARCH/REPLACE blocks and TEST file.
-    
-    Returns dict or None if malformed.
+    """Parse M3 response into a unified edit + test record.
+
+    Two input formats are accepted (newer M3 outputs both):
+
+    1. FILE / CONTENT style (newer, simpler):
+         FILE: src/example.py
+         CONTENT:
+         def hello():
+             return "world"
+
+         TEST: tests/test_example.py
+         TEST_CONTENT:
+         def test_hello():
+             assert True
+
+    2. Aider SEARCH / REPLACE style (legacy, multi-file):
+         src/example.py
+         <<<< SEARCH
+         ...
+         ====
+         ...
+         >>>> REPLACE
+
+         TEST_FILE: tests/test_example.py
+         TEST_CONTENT:
+         def test_hello():
+             assert True
+
+    Returns a dict with:
+        - file_path   (str|None) — the single target file (from FILE: or the
+                                   first Aider block)
+        - diff_or_body(str|None) — the new file content (from CONTENT: or the
+                                   REPLACE of the first Aider block)
+        - edits       (list)     — non-empty for multi-file Aider responses
+        - test_path   (str|None)
+        - test_body   (str|None)
+
+    Returns None if neither format is found.
     """
     import re
     try:
-        result = {"edits": [], "test_path": None, "test_body": None}
-        
-        # 1. Parse Aider SEARCH/REPLACE blocks
-        # Format expected:
-        # file/path.py
-        # <<<< SEARCH
-        # ...
-        # ====
-        # ...
-        # >>>> REPLACE
-        block_pattern = re.compile(
-            r"^([a-zA-Z0-9_./-]+)\s*\n<<<< SEARCH\n(.*?)\n====\n(.*?)\n>>>> REPLACE",
-            re.MULTILINE | re.DOTALL
+        result = {
+            "file_path": None,
+            "diff_or_body": None,
+            "edits": [],
+            "test_path": None,
+            "test_body": None,
+        }
+
+        # ── Format 1: FILE / CONTENT ─────────────────────────────────
+        # Match the FILE: line followed by a CONTENT: block (until blank
+        # line or end of string).
+        file_content_re = re.compile(
+            r"^FILE:\s*(\S+)\s*\nCONTENT:\s*\n(.*?)(?=\n\s*\n|\Z)",
+            re.MULTILINE | re.DOTALL,
         )
-        
-        for match in block_pattern.finditer(response_text):
+        m = file_content_re.search(response_text)
+        if m:
+            result["file_path"] = m.group(1).strip()
+            result["diff_or_body"] = m.group(2).rstrip()
+            # Surface the single-file edit as a one-element edits list so
+            # downstream code that already iterates ``edits`` keeps working.
             result["edits"].append({
-                "file_path": match.group(1).strip(),
-                "search": match.group(2),
-                "replace": match.group(3)
+                "file_path": result["file_path"],
+                "search": "",
+                "replace": result["diff_or_body"],
             })
-            
-        # 2. Parse TEST section
-        test_pattern = re.compile(
-            r"TEST_FILE:\s*([^\n]+)\nTEST_CONTENT:\n(.*)",
-            re.DOTALL
+
+        # ── Format 2: Aider SEARCH / REPLACE ─────────────────────────
+        # Only used if Format 1 didn't match; if both match, Format 1 wins
+        # for file_path / diff_or_body and the Aider blocks add to edits.
+        if not result["file_path"]:
+            block_pattern = re.compile(
+                r"^([a-zA-Z0-9_./-]+)\s*\n<<<< SEARCH\n(.*?)\n====\n(.*?)\n>>>> REPLACE",
+                re.MULTILINE | re.DOTALL,
+            )
+            for match in block_pattern.finditer(response_text):
+                block = {
+                    "file_path": match.group(1).strip(),
+                    "search": match.group(2),
+                    "replace": match.group(3),
+                }
+                result["edits"].append(block)
+                # First block becomes the unified file_path / diff_or_body.
+                if result["file_path"] is None:
+                    result["file_path"] = block["file_path"]
+                    result["diff_or_body"] = block["replace"]
+
+        # ── Test section: TEST_FILE: or TEST: ────────────────────────
+        test_re = re.compile(
+            r"(?:^|\n)\s*(?:TEST_FILE|TEST):\s*([^\n]+)\n\s*TEST_CONTENT:\s*\n(.*)",
+            re.DOTALL,
         )
-        test_match = test_pattern.search(response_text)
+        test_match = test_re.search(response_text)
         if test_match:
             result["test_path"] = test_match.group(1).strip()
-            # Strip trailing markdown if present
             body = test_match.group(2).strip()
             if body.endswith("```"):
                 body = body[:-3].strip()
             result["test_body"] = body
 
-        if not result["edits"] and not result["test_path"]:
-            logger.warning("M3 response missing Aider blocks or test file")
+        # Strict mode: a usable response must have AT LEAST one edit AND
+        # complete test material. Missing pieces return None so the worker
+        # retries rather than acting on a partial parse.
+        has_edit = bool(result["edits"])
+        has_full_test = bool(result["test_path"]) and bool(result["test_body"])
+        if not has_edit or not has_full_test:
+            logger.warning(
+                "M3 response incomplete: edits=%d test_path=%s test_body=%s",
+                len(result["edits"]), result["test_path"],
+                "present" if result["test_body"] else "missing",
+            )
             return None
 
-        logger.info(f"Parsed M3 response: {len(result['edits'])} edits, test={result['test_path']}")
+        logger.info(
+            f"Parsed M3 response: {len(result['edits'])} edits, "
+            f"file={result['file_path']}, test={result['test_path']}"
+        )
         return result
     except Exception as e:
         logger.error(f"Failed to parse M3 response: {e}")
