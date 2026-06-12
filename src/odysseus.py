@@ -474,6 +474,15 @@ def main(argv=None):
     rec.update({"ts": time.time(), "prompt": args.mission, "lane": lane,
                 "router": router, "quota_remaining": remaining, "cost": None,
                 "duration": rec.get("duration", round(time.time() - t0, 1))})
+    try:  # M3 grades the attempt (free, advisory — the gate already judged)
+        import m3
+        rec["post_mortem"] = m3.complete(
+            f"Mission: {args.mission}\nAgent: {rec.get('agent_used')} "
+            f"Result: {rec.get('result')} test_passed: {rec.get('test_passed')}\n"
+            "One sentence: what does this outcome teach the router?",
+            max_tokens=400, timeout=30).split("</think>")[-1].strip()[:300]
+    except Exception:
+        pass
     path = write_feedback(rec)
     print(f"[ody] feedback -> {path}", file=sys.stderr)
     return 0 if rec.get("result") in ("ok", "dry_run") else 1
