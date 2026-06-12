@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.jwalinshah.agy-quota-scraper.plist
+
+  Runs the Antigravity UI quota scraper in BACKGROUND mode (no foreground
+  interaction, no app activation, no Cmd+, keystrokes, no clicks) every
+  10 minutes and writes the canonical quota JSON to
+  /Users/jwalinshah/.quota-status/agy.json.
+
+  REQUIREMENTS for background mode to work:
+    1. Antigravity app must be open and at the Settings -> Models pane.
+       The scraper only screencaptures the existing window; it cannot
+       drive the UI to get there.
+    2. Screen Recording permission must be granted to /usr/bin/python3
+       (or the Python interpreter used) in System Settings -> Privacy &
+       Security -> Screen Recording. macOS prompts the first time the
+       screencapture command is run.
+    3. Accessibility permission must be granted to the same interpreter
+       IF the app does not appear in the Window Server (rare; the
+       screencapture -l<id> path does not need it).
+
+  INSTALL:
+    cp this file to ~/Library/LaunchAgents/com.jwalinshah.agy-quota-scraper.plist
+    launchctl unload ~/Library/LaunchAgents/com.jwalinshah.agy-quota-scraper.plist 2>/dev/null
+    launchctl load   ~/Library/LaunchAgents/com.jwalinshah.agy-quota-scraper.plist
+
+  VERIFY:
+    launchctl list | grep agy-quota
+    tail -f /Users/jwalinshah/.quota-status/agy-errors.log
+
+  This file is currently NOT installed. See ../README.md for the full
+  operator runbook.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jwalinshah.agy-quota-scraper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jwalinshah/projects/odysseus/.venv/bin/python3</string>
+        <string>/Users/jwalinshah/projects/odysseus/src/quota_scraper.py</string>
+        <string>--background</string>
+    </array>
+
+    <!-- Run every 10 minutes (600 seconds). -->
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <!-- Run once on load so the JSON exists immediately after install. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Keep the process from being killed by the system. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Capture stdout / stderr to ~/.quota-status/ where the rest of the
+         quota pipeline writes. The quota scraper writes its screenshots
+         to /tmp/agy_quota_screenshot*.png and the canonical live_status
+         pipeline picks them up on the next 10-min run. -->
+    <key>StandardOutPath</key>
+    <string>/Users/jwalinshah/.quota-status/agy-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jwalinshah/.quota-status/agy-errors.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/jwalinshah/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/jwalinshah</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jwalinshah</string>
+</dict>
+</plist>

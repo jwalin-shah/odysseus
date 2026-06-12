@@ -11,6 +11,9 @@ ody 'review the v2 router for security'             # analyze lane (M3 direct)
 ody 'find arxiv papers on agent routing'            # research lane (arxiv + M3 synthesis)
 ody run '<mission>' --hybrid FILE:FUNC ...          # M3 drafts func body, AST splice, gate
 ody run '<mission>' --repo DIR --test 'pytest -q'   # explicit form + options
+ody supervise propose --max-missions 5              # mine evidence into deduped workpacks
+ody supervise run --max-missions 5                  # requirements → tests → code → red team
+ody supervise status                                # queue + ledger paths and pending count
 ody ask --pane current 'what is happening'          # tmux observability (v1)
 ody start|stop|status|logs|sessions                 # v1 app, unchanged
 ```
