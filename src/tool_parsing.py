@@ -179,6 +179,8 @@ _TOOL_NAME_MAP = {
     "run_mission": "dispatch_mission",
     "list_missions": "list_missions",
     "missions": "list_missions",
+    "supervise_missions": "supervise_missions",
+    "supervise": "supervise_missions",
 }
 
 

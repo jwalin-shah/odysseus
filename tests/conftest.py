@@ -7,6 +7,10 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Force all tests to use an in-memory SQLite database by default
+# so autonomous test runners don't crash with "unable to open database file"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+
 # Pre-import real heavy modules BEFORE any test file's module-level stubs can
 # replace them with MagicMock. Some test files (e.g. test_llm_core_sanitize_*)
 # stub sqlalchemy/core.database at module scope with `if mod not in sys.modules`,

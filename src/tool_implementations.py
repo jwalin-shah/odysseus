@@ -10,6 +10,8 @@ import logging
 import os
 import pathlib
 import re
+import subprocess
+import asyncio
 from typing import Any, Dict, List, Optional
 
 MAX_OUTPUT_CHARS = 10_000
@@ -4510,6 +4512,130 @@ async def do_dispatch_log_tail(content: str, owner: Optional[str] = None) -> Dic
         "start_byte": min(since_bytes, size),
         "total_bytes": size,
         "content": content,
+    }
+
+
+async def do_tla_chat(content: str, owner: Optional[str] = None) -> Dict:
+    """Direct chat with a single agent. No worktree, no dispatch loop.
+
+    This is the per-agent surface the user asked for: pick the agent
+    explicitly, send a message, get a response. Use it for one-off
+    questions, ad-hoc analysis, or to compare how different agents
+    answer the same prompt.
+
+    Args:
+        agent:    one of: claude, ca, cb, cc, codex, gemini, agy, m3,
+                  opencode-m3, opencode-opus, cursor-agent
+        message:  the prompt
+        cwd:      working directory (default: odysseus home)
+        timeout:  seconds (default 180)
+
+    Returns:
+        {exit_code, agent, response, stderr, duration, cost?}
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    agent = args.get("agent")
+    message = args.get("message", "").strip()
+    if not agent:
+        return {"error": "tla_chat: agent is required",
+                "exit_code": 1,
+                "known_agents": sorted(__import__("src.odysseus", fromlist=["REGISTRY"]).REGISTRY.keys())}
+    if not message:
+        return {"error": "tla_chat: message is required", "exit_code": 1}
+
+    cwd = args.get("cwd") or __import__("os").getcwd()
+    timeout = int(args.get("timeout") or 180)
+
+    try:
+        from src.odysseus import run_agent, REGISTRY
+        rc, out, err, dur = run_agent(agent, message, cwd=cwd, timeout=timeout)
+    except ValueError as e:
+        return {"error": str(e), "exit_code": 1,
+                "known_agents": sorted(REGISTRY.keys())}
+    except Exception as e:
+        return {"error": f"tla_chat: {e}", "exit_code": 1}
+
+    return {
+        "exit_code": rc,
+        "agent": agent,
+        "response": out[-8000:] if out else "",  # cap for transport
+        "stderr": err[-2000:] if err else "",
+        "duration": round(dur, 2),
+    }
+
+
+async def do_tla_quota(content: str, owner: Optional[str] = None) -> Dict:
+    """Return the current canonical subscription quota state.
+
+    Delegates to ``/Users/jwalinshah/bin/quota --json`` (which in turn
+    reads the launchd-updated cache at ``~/Library/Application Support/``)
+    so the answer matches what the user sees when they run ``quota`` in
+    a terminal. The odysseus dispatch-internal budget lives in
+    ``.credit-lab/quota.db`` and is exposed via ``do_list_missions``
+    / the feedback ledger; it is NOT this tool's job.
+
+    Args:
+        content: JSON string. Recognized keys:
+            - ``agent`` (str): filter to a single provider / agent name
+            - ``include_agy`` (bool, default True): include agy
+            - ``quota_bin`` (str): path to the ``quota`` executable
+              (default: ``/Users/jwalinshah/bin/quota``)
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    quota_bin = pathlib.Path(args.get("quota_bin")
+                             or os.environ.get("ODY_QUOTA_BIN")
+                             or "/Users/jwalinshah/bin/quota")
+    if not quota_bin.exists():
+        return {"error": f"quota binary not found: {quota_bin}",
+                "exit_code": 1, "quota": {}}
+
+    cmd = [str(quota_bin), "--json"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except (asyncio.TimeoutError, FileNotFoundError) as e:
+        return {"error": f"quota exec failed: {e}",
+                "exit_code": 1, "quota": {}}
+
+    if proc.returncode != 0:
+        return {"error": f"quota exited {proc.returncode}: "
+                          f"{err.decode(errors='replace')[:500]}",
+                "exit_code": proc.returncode, "quota": {}}
+
+    try:
+        parsed = json.loads(out.decode())
+    except json.JSONDecodeError as e:
+        return {"error": f"quota --json parse failed: {e}",
+                "exit_code": 1, "quota": {}}
+
+    providers = parsed.get("providers", {})
+    agent_filter = args.get("agent")
+    if agent_filter:
+        if agent_filter in providers:
+            providers = {agent_filter: providers[agent_filter]}
+        else:
+            return {"error": f"agent {agent_filter!r} not in canonical quota. "
+                              f"known: {sorted(providers)}",
+                    "exit_code": 1, "quota": {}}
+
+    if not args.get("include_agy", True) and "agy" in providers:
+        providers = {k: v for k, v in providers.items() if k != "agy"}
+
+    return {
+        "exit_code": 0,
+        "as_of": parsed.get("as_of") or parsed.get("timestamp"),
+        "quota": providers,
     }
 
 

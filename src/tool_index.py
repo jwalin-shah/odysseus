@@ -25,7 +25,7 @@ ALWAYS_AVAILABLE = frozenset({
     "bash", "python", "web_search", "web_fetch",
     # Mission dispatch is the orchestrator's core capability — never let the
     # RAG selector hide it (embeddings can be down or rank it poorly).
-    "dispatch_mission", "list_missions",
+    "dispatch_mission", "list_missions", "supervise_missions",
     # File tools: read AND write/edit. An agent with disk access should always
     # be able to change files, not just read them — otherwise a bare "edit X"
     # request can miss write_file/edit_file (RAG-only) and the model wrongly
@@ -70,6 +70,7 @@ COLLECTION_NAME = "odysseus_tool_index"
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "dispatch_mission": "Spawn a bounded background coding/analysis/research worker (odysseus mission): fix a bug, make tests pass, review code, find papers. Runs in an isolated git worktree with a test gate; green results land on ody-* branches. Use for 'fix X', 'spawn a worker', 'run a mission', 'have an agent do X'.",
     "list_missions": "Check outcomes of dispatched odysseus missions: prompt, lane, agent used, test_passed verdict, branch, quota remaining. Use after dispatch_mission or when asked 'how did the mission go' / 'what workers ran'.",
+    "supervise_missions": "Control the bounded Odysseus self-improvement queue: propose missions from blueprint/mining evidence, enqueue a mission, run test-author/implementer/red-team cycles, or inspect supervisor status.",
     "bash": "Run shell commands on the server. Install packages, check files, git operations, curl, system info, process management, networking.",
     "python": "Execute Python code for computation, data processing, math, scripting, parsing, API calls. Not for writing code for the user.",
     "web_search": "Quick single web lookup for a fact, current event, or doc mid-task. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",

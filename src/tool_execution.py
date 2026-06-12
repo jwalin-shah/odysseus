@@ -1126,7 +1126,7 @@ async def execute_tool_block(
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
-        do_dispatch_mission, do_list_missions,
+        do_dispatch_mission, do_list_missions, do_supervise_missions,
     )
 
     tool = block.tool_type
@@ -1351,6 +1351,9 @@ async def execute_tool_block(
     elif tool == "list_missions":
         desc = "list_missions"
         result = await do_list_missions(content, owner=owner)
+    elif tool == "supervise_missions":
+        desc = "supervise_missions"
+        result = await do_supervise_missions(content, owner=owner)
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()

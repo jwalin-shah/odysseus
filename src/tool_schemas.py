@@ -1141,6 +1141,26 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "supervise_missions",
+            "description": "Controls the bounded self-improvement supervisor. Propose missions from blueprint/mining evidence, enqueue work, run separated requirements/test/implementer/red-team roles, or inspect status. Never merges or deploys.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "enqueue", "propose", "run"]},
+                    "mission": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "test": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                    "max_missions": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "max_attempts": {"type": "integer", "minimum": 1, "maximum": 5}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "mark_email_read",
             "description": "Mark one email as read or unread by UID. For multiple messages, use bulk_email instead. Always pass account when the email came from a named account such as Gmail.",
             "parameters": {
@@ -1334,7 +1354,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
                         "manage_tokens", "manage_documents", "manage_settings",
-                        "dispatch_mission", "list_missions"):
+                        "dispatch_mission", "list_missions", "supervise_missions"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")
