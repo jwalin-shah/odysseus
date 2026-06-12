@@ -35,7 +35,9 @@ DOCS_TOTAL_CAP = 30000       # whole preamble
 
 # argv templates; {prompt} is substituted. kind: coder | analyst | research
 REGISTRY = {
-    "claude":        {"argv": ["claude", "-p", "{prompt}"], "kind": "coder"},
+    # bypass is safe here: coder runs only inside a disposable worktree with a
+    # pytest gate; red = discarded
+    "claude":        {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
     "opencode-opus": {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder"},
     "codex":         {"argv": ["codex", "exec", "{prompt}"], "kind": "coder"},
     "opencode-m3":   {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst"},
