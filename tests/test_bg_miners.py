@@ -162,7 +162,7 @@ class TestHotReloadBehavior:
     def test_miner_config_sources_supported(self):
         """Verify all miners use supported sources."""
         config = load_miners_config()
-        supported_sources = {"githits", "transcripts", "agent_histories"}
+        supported_sources = {"githits", "transcripts", "agent_histories", "implementer"}
         for miner in config:
             source = miner.get("source")
             assert source in supported_sources, f"Unsupported source: {source}"

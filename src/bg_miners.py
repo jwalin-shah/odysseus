@@ -74,12 +74,28 @@ def get_recent_transcripts(limit=50):
 def get_agent_histories() -> str:
     """Mine transcripts from all local agent CLI roots, recent files only."""
     roots = [
+        Path.home() / ".gemini" / "antigravity-cli" / "brain",
+        Path.home() / ".gemini",
         Path.home() / ".claude-a" / "projects",
         Path.home() / ".claude-b" / "projects",
         Path.home() / ".claude-p" / "projects",
         Path.home() / ".claude" / "projects",
+        Path.home() / ".claude" / "logs",
         Path.home() / ".codex" / "sessions",
         Path.home() / ".codex" / "projects",
+        Path.home() / ".cursor",
+        Path.home() / ".cursor-tutor",
+        Path.home() / ".opencode" / "sessions",
+        Path.home() / ".config" / "opencode" / "sessions",
+        Path.home() / ".gemini",
+        Path.home() / ".pi",
+        Path.home() / ".memjuice" / "pcr-fanout-old-mac-logs-synthesis-2026-05-31",
+        Path.home() / "Documents" / "Codex" / "2026-05-30" / "pcr-fanout-old-mac-logs-synthesis-2026-05-31",
+        Path.home() / "projects" / "_archive" / "orchestrator-legacy",
+        Path.home() / "projects" / "_archive" / "old-mac-raw-logs",
+        Path.home() / ".memjuice" / "orchestrator-legacy",
+        Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "workspaceStorage",
+        Path.home() / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev",
     ]
 
     # Collect JSONL files from all roots
@@ -88,23 +104,51 @@ def get_agent_histories() -> str:
         if not root.exists():
             continue
         try:
-            jsonl_files = list(root.glob("**/*.jsonl")) + list(root.glob("**/transcript.json"))
+            jsonl_files = (
+                list(root.glob("**/*.jsonl")) +
+                list(root.glob("**/transcript.json")) +
+                list(root.glob("**/logs.json"))
+            )
             all_files.extend(jsonl_files)
         except Exception as e:
             logger.debug(f"Failed to glob {root}: {e}")
 
-    # Sort by mtime, take N most recent
+    # Load cursor state to process the ENTIRE backlog sequentially
+    cursor_path = Path("data/transcript_cursor.json")
+    processed_files = set()
+    if cursor_path.exists():
+        try:
+            with open(cursor_path) as f:
+                processed_files = set(json.load(f))
+        except:
+            pass
+
+    # Filter out files we've already processed
+    unprocessed_files = [f for f in all_files if str(f) not in processed_files]
+
+    # Sort by mtime ascending (oldest first) to chew through the historical backlog
     try:
-        all_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        unprocessed_files.sort(key=lambda p: p.stat().st_mtime)
     except:
         pass
 
-    recent_files = all_files[:5]  # N=5 most recent
+    recent_files = unprocessed_files[:50]  # Take next 50 chunks of the backlog
+    
+    # Mark these as processed for the next loop
+    for f in recent_files:
+        processed_files.add(str(f))
+    
+    try:
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cursor_path, "w") as f:
+            json.dump(list(processed_files), f)
+    except Exception as e:
+        logger.debug(f"Failed to save transcript cursor: {e}")
 
     # Extract exchanges, label with source, truncate
     exchanges = []
     total_chars = 0
-    max_total = 15000
+    max_total = 100000
 
     for fpath in recent_files:
         if total_chars >= max_total:
@@ -149,7 +193,7 @@ def get_agent_histories() -> str:
 
 # --- ADAPTIVE INTELLIGENCE ---
 
-async def get_next_research_step(client, base_url, session_id, current_query, last_report):
+async def get_next_research_step(client, base_url, session_id, current_query, last_report, model="MiniMax-M3"):
     planning_prompt = (
         f"We just finished a research pass for: '{current_query}'.\n\n"
         f"LATEST FINDINGS SUMMARY:\n{last_report[:2000]}\n\n"
@@ -158,10 +202,10 @@ async def get_next_research_step(client, base_url, session_id, current_query, la
         "Respond with ONLY the new query string. No chatter."
     )
     try:
-        payload = {"message": planning_prompt, "session": session_id, "model": "MiniMax-M3"}
+        payload = {"message": planning_prompt, "session": session_id, "model": model}
         res = await client.post(f"{base_url}/api/chat", json=payload, headers={"X-Odysseus-Owner": "admin"})
         if res.status_code == 200:
-            new_query = res.json().get("text", "").strip()
+            new_query = res.json().get("response", "").strip()
             if "\n" in new_query: new_query = new_query.split("\n")[0]
             return new_query.strip("\"' ")
     except Exception as e:
@@ -169,6 +213,15 @@ async def get_next_research_step(client, base_url, session_id, current_query, la
     return current_query
 
 # --- THE MINER LOOPS ---
+
+async def run_miner_or_implementer(name: str, initial_query: str, interval: int, source: str = "githits"):
+    """Route to appropriate loop based on source type."""
+    if source == "implementer":
+        # Import here to avoid circular dependency
+        from src.bg_implementer import run_implementer_loop
+        await run_implementer_loop(interval)
+    else:
+        await run_adaptive_miner_loop(name, initial_query, interval, source)
 
 async def run_adaptive_miner_loop(name: str, initial_query: str, interval: int, source: str = "githits"):
     """Run an adaptive miner loop with hot-reload support.
@@ -201,6 +254,8 @@ async def run_adaptive_miner_loop(name: str, initial_query: str, interval: int, 
             new_configured_query = miner_cfg.get("query", configured_query)
             new_source = miner_cfg.get("source", source)
             new_interval = miner_cfg.get("interval_seconds", interval)
+            model = miner_cfg.get("model", "MiniMax-M3")
+            endpoint_id = miner_cfg.get("endpoint_id", "dd45625c")
 
             if new_configured_query != configured_query:
                 logger.info(f"[{name}] Config query changed: {configured_query} -> {new_configured_query}")
@@ -219,6 +274,29 @@ async def run_adaptive_miner_loop(name: str, initial_query: str, interval: int, 
                 context = get_recent_transcripts(100)
             elif source == "agent_histories":
                 context = get_agent_histories()
+            elif source == "insights":
+                context = ""
+                staging_dir = Path("data/skills_staging")
+                if staging_dir.exists():
+                    files = list(staging_dir.glob("*.md"))
+                    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    for f in files[:5]: # Take top 5 recent insights
+                        context += f"\n--- INSIGHT FROM {f.name} ---\n{f.read_text()[:3000]}\n"
+                if not context.strip():
+                    context = "No recent insights generated yet."
+            elif source == "github":
+                context = "--- RECENT COMMITS & DIFFS ---\n"
+                try:
+                    import subprocess
+                    # Grab the last 20 commits with full patch diffs to see the exact code evolution
+                    git_log = subprocess.check_output(["git", "log", "-p", "-n", "20"], text=True)
+                    context += git_log[:30000] # Truncate to avoid blowing up the context window
+                    
+                    context += "\n--- RECENT GITHUB ISSUES & ARCHITECTURE DISCUSSIONS ---\n"
+                    gh_issues = subprocess.check_output(["gh", "issue", "list", "--state", "all", "--limit", "20"], text=True)
+                    context += gh_issues[:10000]
+                except Exception as e:
+                    context += f"Failed to fetch GitHub data: {e}"
             else:
                 context = "General research mode."
 
@@ -228,7 +306,7 @@ async def run_adaptive_miner_loop(name: str, initial_query: str, interval: int, 
                 session_id = next((s["id"] for s in sessions_res.json() if s["name"] == name), None)
                 if not session_id:
                     create_res = await client.post(f"{base_url}/api/session", headers={"X-Odysseus-Owner": "admin"},
-                        data={"name": name, "model": "MiniMax-M3", "endpoint_id": "dd45625c", "skip_validation": "true"})
+                        data={"name": name, "model": model, "endpoint_id": endpoint_id, "skip_validation": "true"})
                     session_id = create_res.json().get("id")
 
                 # 4. Report Synthesis
@@ -248,15 +326,23 @@ async def run_adaptive_miner_loop(name: str, initial_query: str, interval: int, 
                     "Report for Jwalin's 1-Surface dashboard."
                 )
 
-                payload = {"message": report_prompt, "session": session_id, "model": "MiniMax-M3"}
+                payload = {"message": report_prompt, "session": session_id, "model": model}
                 res = await client.post(f"{base_url}/api/chat", json=payload, headers={"X-Odysseus-Owner": "admin"})
 
                 if res.status_code == 200:
-                    last_report = res.json().get("text", "")
+                    last_report = res.json().get("response", "")
+                    
+                    # Physically save the blueprint to the staging directory so the Synthesis Engine and Implementer can read it
+                    staging_dir = Path("data/skills_staging")
+                    staging_dir.mkdir(parents=True, exist_ok=True)
+                    import time
+                    timestamp = int(time.time())
+                    (staging_dir / f"insight_{name}_{timestamp}.md").write_text(last_report)
+                    
                     # 5. Evolution Phase (only if we haven't just reset to config)
-                    new_current_query = await get_next_research_step(client, base_url, session_id, current_query, last_report)
+                    new_current_query = await get_next_research_step(client, base_url, session_id, current_query, last_report, model=model)
                     current_query = new_current_query
-                    logger.info(f"[{name}] Report captured. Next: {current_query}")
+                    logger.info(f"[{name}] Report captured and saved to staging. Next: {current_query}")
                 else:
                     logger.error(f"[{name}] Synthesis failed: {res.status_code}")
 
@@ -298,7 +384,7 @@ async def start_all_miners():
                         if name not in active_miners:
                             logger.info(f"Spawning miner: {name}")
                             task = asyncio.create_task(
-                                run_adaptive_miner_loop(
+                                run_miner_or_implementer(
                                     name,
                                     miner_cfg.get("query", ""),
                                     miner_cfg.get("interval_seconds", 3600),
@@ -316,7 +402,7 @@ async def start_all_miners():
                             logger.error(f"Miner {name} task ended with error: {e}")
                         logger.info(f"Re-spawning ended miner: {name}")
                         task = asyncio.create_task(
-                            run_adaptive_miner_loop(
+                            run_miner_or_implementer(
                                 name,
                                 miner_cfg.get("query", ""),
                                 miner_cfg.get("interval_seconds", 3600),
