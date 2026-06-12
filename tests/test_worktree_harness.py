@@ -108,6 +108,24 @@ def test_dispatch_mission_uses_venv_python(tmp_path, monkeypatch):
 # (2) do_code worktree test subprocess: venv bin must be on PATH              #
 # --------------------------------------------------------------------------- #
 
+def test_venv_bin_walks_up_to_main_repo(tmp_path, monkeypatch):
+    """A worktree at <main>/.ody-worktrees/<branch>/ must resolve to the
+    MAIN repo's venv, not the worktree's. Otherwise pytest is not on PATH
+    in the worktree shell, which was the F5 / harness failure mode.
+    """
+    from src.odysseus import _venv_bin
+    # Fake layout: <main>/.venv/bin and <main>/.ody-worktrees/<branch>/
+    main = tmp_path / "main"
+    (main / ".venv" / "bin").mkdir(parents=True)
+    wt = main / ".ody-worktrees" / "ody-test"
+    wt.mkdir(parents=True)
+    assert _venv_bin(str(wt)) == (main / ".venv" / "bin")
+    # When there is no venv at all, return None (callers fall back to system).
+    no_venv = tmp_path / "no_venv"
+    no_venv.mkdir()
+    assert _venv_bin(str(no_venv)) is None
+
+
 def test_worktree_test_subprocess_venv_on_path(tmp_path, monkeypatch):
     """The worktree-shell test invocation must put venv/bin on PATH.
 

@@ -13,6 +13,7 @@ on that data; .credit-lab/mining/FINDINGS.md holds the corpus-derived rules.
 import argparse
 import json
 import os
+import pathlib
 import shutil
 import ssl
 import subprocess
@@ -331,18 +332,37 @@ def derive_hybrid_spec(mission, repo):
     return None
 
 
+def _venv_bin(project_dir):
+    """Locate the project's venv bin directory, walking up if in a worktree.
+
+    A git worktree is a separate checkout at
+    ``<main_repo>/.ody-worktrees/<branch>/`` and does NOT have its own
+    ``.venv/``. Code running inside a worktree must still resolve to the
+    main repo's venv. Try the current dir first, then walk up.
+    """
+    p = pathlib.Path(project_dir).resolve()
+    for candidate in (p, p.parent, p.parent.parent):
+        v = candidate / ".venv" / "bin"
+        if v.is_dir():
+            return v
+    return None
+
+
 def _worktree_test_env(repo):
     """Build the env for a worktree test subprocess.
 
     The worktree is a separate git checkout; it does NOT have its own
-    ``.venv/``. We prepend ``<repo>/.venv/bin`` to PATH so ``pytest``,
-    ``python``, etc. resolve to the project venv, not the system Python.
-    Without this, ``pytest -q`` fails with ``pytest: command not found``.
+    ``.venv/``. We prepend the project's venv bin to PATH (walking up from
+    the worktree to the main repo if needed) so ``pytest``, ``python``,
+    etc. resolve to the project venv, not the system Python. Without this,
+    ``pytest -q`` fails with ``pytest: command not found``.
     """
     env = os.environ.copy()
-    venv_bin = os.path.join(repo, ".venv", "bin")
-    if os.path.isdir(venv_bin) and venv_bin not in env.get("PATH", "").split(":"):
-        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    venv_bin = _venv_bin(repo)
+    if venv_bin is not None:
+        venv_bin_str = str(venv_bin)
+        if venv_bin_str not in env.get("PATH", "").split(":"):
+            env["PATH"] = f"{venv_bin_str}:{env.get('PATH', '')}"
     return env
 
 

@@ -4154,10 +4154,17 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
 
 async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict:
     """Launch src/odysseus.py as a detached background subprocess."""
-    import asyncio
     import datetime
+    import hashlib
     import pathlib
     import subprocess
+    import time
+    import uuid
+
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
 
     try:
         args = json.loads(content) if content.strip().startswith("{") else {}
@@ -4176,12 +4183,36 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
     timeout = int(args.get("timeout") or 900)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = pathlib.Path(project_dir) / ".credit-lab" / "ody"
+    log_dir = pathlib.Path(globals().get(
+        "MISSION_LOG_DIR",
+        pathlib.Path(project_dir) / ".credit-lab" / "ody",
+    ))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = str(log_dir / f"app-dispatch-{ts}.log")
+    ledger_path = log_dir / "dispatch-dedup.jsonl"
+    canonical = json.dumps(
+        {"mission": mission, "repo": repo, "test": test},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    now = time.time()
 
+    # Use the project venv python when present; the system ``python3`` has no
+    # pytest, no project deps, and breaks the worktree's ``pytest -q`` gate.
+    # When this code is running inside a git worktree (the common case for
+    # mission workers), walk up to the main repo's .venv/ — the worktree
+    # itself has no venv of its own.
+    p = pathlib.Path(project_dir).resolve()
+    venv_python = None
+    for candidate in (p, p.parent, p.parent.parent):
+        candidate_python = candidate / ".venv" / "bin" / "python"
+        if candidate_python.exists():
+            venv_python = candidate_python
+            break
+    launcher = str(venv_python) if venv_python is not None else "python3"
     cmd = [
-        "python3", f"{project_dir}/src/odysseus.py",
+        launcher, f"{project_dir}/src/odysseus.py",
         mission,
         "--repo", repo,
         "--test", test,
@@ -4192,18 +4223,64 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
     if hybrid:
         cmd += ["--hybrid", hybrid]
 
+    ledger = open(ledger_path, "a+")
     try:
+        if fcntl is not None:
+            fcntl.flock(ledger.fileno(), fcntl.LOCK_EX)
+        ledger.seek(0)
+        for line in ledger:
+            try:
+                record = json.loads(line)
+                age = now - float(record["ts"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            if record.get("key") == key and 0 <= age < 3600:
+                return {
+                    "output": f"Mission already dispatched as {record['dispatch_id']}.",
+                    "exit_code": 0,
+                    "duplicate_of": record["dispatch_id"],
+                    "dispatch_id": record["dispatch_id"],
+                    "pid": record.get("pid"),
+                    "log": record.get("log"),
+                    "cooldown_remaining_s": int(3600 - age),
+                }
+
         log_file = open(log_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=log_file,
-            start_new_session=True,
-            cwd=project_dir,
-        )
-        return {"output": f"Mission dispatched (pid={proc.pid}). Log: {log_path}", "exit_code": 0, "pid": proc.pid, "log": log_path}
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                start_new_session=True,
+                cwd=project_dir,
+            )
+        finally:
+            log_file.close()
+        dispatch_id = f"d_{ts}_{uuid.uuid4().hex[:8]}"
+        ledger.write(json.dumps({
+            "dispatch_id": dispatch_id,
+            "key": key,
+            "pid": proc.pid,
+            "log": log_path,
+            "ts": now,
+        }, sort_keys=True) + "\n")
+        ledger.flush()
+        return {
+            "output": f"Mission dispatched (pid={proc.pid}). Log: {log_path}",
+            "exit_code": 0,
+            "pid": proc.pid,
+            "log": log_path,
+            "dispatch_id": dispatch_id,
+        }
     except Exception as e:
         return {"error": f"dispatch_mission: {e}", "exit_code": 1}
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(ledger.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        ledger.close()
 
 
 async def do_list_missions(content: str, owner: Optional[str] = None) -> Dict:
@@ -4253,3 +4330,54 @@ async def do_list_missions(content: str, owner: Optional[str] = None) -> Dict:
 
     records = records[:limit]
     return {"output": json.dumps(records, indent=2, default=str), "exit_code": 0, "records": records}
+
+
+async def do_supervise_missions(content: str, owner: Optional[str] = None) -> Dict:
+    """Control the bounded self-improvement supervisor."""
+    import pathlib
+    import subprocess
+
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    action = args.get("action", "status")
+    if action not in {"status", "enqueue", "propose", "run"}:
+        return {"error": f"unsupported supervisor action: {action}", "exit_code": 1}
+
+    project_dir = pathlib.Path(__file__).parent.parent.resolve()
+    state_dir = args.get("state_dir") or str(project_dir / ".credit-lab" / "supervisor")
+    cmd = [
+        "python3", str(project_dir / "src" / "odysseus.py"),
+        "supervise", action, "--state-dir", state_dir,
+        "--repo", args.get("repo") or str(project_dir),
+        "--max-missions", str(min(20, max(1, int(args.get("max_missions") or 5)))),
+        "--max-attempts", str(min(5, max(1, int(args.get("max_attempts") or 3)))),
+    ]
+    if args.get("mission"):
+        cmd += ["--mission", args["mission"]]
+    if args.get("test"):
+        cmd += ["--test", args["test"]]
+    for evidence in args.get("evidence") or []:
+        cmd += ["--evidence", evidence]
+
+    if action in {"run", "propose"}:
+        log_dir = pathlib.Path(state_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{action}-{int(time.time())}.log"
+        log_file = open(log_path, "w")
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=project_dir, stdout=log_file, stderr=log_file,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
+        return {
+            "output": f"Supervisor {action} started (pid={proc.pid}).",
+            "exit_code": 0, "pid": proc.pid, "log": str(log_path),
+        }
+
+    proc = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True)
+    return {"output": (proc.stdout or proc.stderr).strip(),
+            "exit_code": proc.returncode}
