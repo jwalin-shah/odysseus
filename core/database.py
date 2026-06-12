@@ -1,4 +1,5 @@
 import os
+import pathlib
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -29,8 +30,16 @@ class TimestampMixin:
     def updated_at(cls):
         return Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
-# Get database URL from environment, default to SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
+# Get database URL from environment. The default is an ABSOLUTE sqlite path so
+# the engine works regardless of cwd — critical for git worktree subprocesses,
+# where ``./data/app.db`` would resolve to the worktree (no ./data/ dir) and
+# fail with ``unable to open database file``.
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    _default_db_dir = pathlib.Path(__file__).resolve().parent.parent / "data"
+    _default_db_dir.mkdir(parents=True, exist_ok=True)
+    _default_db = _default_db_dir / "app.db"
+    DATABASE_URL = f"sqlite:///{_default_db}"
 
 # Create engine
 engine = create_engine(

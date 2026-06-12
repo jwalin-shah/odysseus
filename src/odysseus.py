@@ -331,6 +331,21 @@ def derive_hybrid_spec(mission, repo):
     return None
 
 
+def _worktree_test_env(repo):
+    """Build the env for a worktree test subprocess.
+
+    The worktree is a separate git checkout; it does NOT have its own
+    ``.venv/``. We prepend ``<repo>/.venv/bin`` to PATH so ``pytest``,
+    ``python``, etc. resolve to the project venv, not the system Python.
+    Without this, ``pytest -q`` fails with ``pytest: command not found``.
+    """
+    env = os.environ.copy()
+    venv_bin = os.path.join(repo, ".venv", "bin")
+    if os.path.isdir(venv_bin) and venv_bin not in env.get("PATH", "").split(":"):
+        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    return env
+
+
 def do_code(mission, args, docs):
     if not args.hybrid and not args.tool and not args.dry_run:
         # cheap-first default: try the free M3 splice before any paid coder
@@ -368,6 +383,7 @@ def do_code(mission, args, docs):
                 if rc != 0:
                     break
                 test = subprocess.run(args.test, shell=True, cwd=wt,
+                                      env=_worktree_test_env(repo),
                                       capture_output=True, text=True, timeout=600)
                 passed = test.returncode == 0
                 if passed:
@@ -412,8 +428,8 @@ def do_code(mission, args, docs):
                   f"edit files directly; the gate is: `{args.test}`):\n{mission}"
                   if docs or repomap else mission)
         rc, out, err, dur = run_tool(tool, prompt, wt, args.timeout)
-        test = subprocess.run(args.test, shell=True, cwd=wt, capture_output=True,
-                              text=True, timeout=600)
+        test = subprocess.run(args.test, shell=True, cwd=wt, env=_worktree_test_env(repo),
+                              capture_output=True, text=True, timeout=600)
         passed = test.returncode == 0
         if passed:
             subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
@@ -442,6 +458,10 @@ def write_feedback(record):
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "supervise":
+        from ody_supervisor import supervise_main
+        return supervise_main(argv[1:])
     p = argparse.ArgumentParser(prog="ody", description=__doc__.splitlines()[0])
     p.add_argument("mission", help="what to do, in plain words")
     p.add_argument("--repo", default=os.getcwd(), help="target repo (default: cwd)")
