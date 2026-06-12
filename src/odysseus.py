@@ -470,8 +470,18 @@ def do_code(mission, args, docs):
 
 
 def write_feedback(record):
-    os.makedirs(FEEDBACK_DIR, exist_ok=True)
-    path = os.path.join(FEEDBACK_DIR, f"{int(time.time() * 1000)}.jsonl")
+    # Honor ODY_FEEDBACK_DIR if set, so do_dispatch_mission can route
+    # feedback to the dispatch's log dir (and do_dispatch_status can find
+    # it there). Default to the project-wide FEEDBACK_DIR.
+    feedback_dir = os.environ.get("ODY_FEEDBACK_DIR", FEEDBACK_DIR)
+    os.makedirs(feedback_dir, exist_ok=True)
+    path = os.path.join(feedback_dir, f"{int(time.time() * 1000)}.jsonl")
+    # Stamp dispatch_id from env if set, so do_dispatch_status can match
+    # the feedback record back to its dispatch.
+    dispatch_id = os.environ.get("ODY_DISPATCH_ID")
+    if dispatch_id:
+        record = dict(record)
+        record["dispatch_id"] = dispatch_id
     with open(path, "w") as f:
         f.write(json.dumps(record) + "\n")
     return path

@@ -8,6 +8,7 @@ These handle the actual execution logic for each tool type.
 import json
 import logging
 import os
+import pathlib
 import re
 from typing import Any, Dict, List, Optional
 
@@ -4152,8 +4153,98 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
 # Mission tools
 # ---------------------------------------------------------------------------
 
+def _wait_for_feedback(log_dir, dispatch_id, proc, wait_timeout):
+    """Poll the log dir for a feedback file stamped with ``dispatch_id``.
+
+    The worker writes a feedback file in ``log_dir`` at the end of its run
+    via ``odysseus.write_feedback``. We poll every 0.25s for up to
+    ``wait_timeout`` seconds, and stop early if the worker pid exits (even
+    without feedback, e.g. crash). Returns the parsed record, or None on
+    timeout.
+    """
+    import os
+    import time
+    deadline = time.time() + wait_timeout
+    while time.time() < deadline:
+        # Has the worker exited? (No /proc on macOS, use kill(pid, 0).)
+        alive = True
+        try:
+            os.kill(proc.pid, 0)
+        except (OSError, ProcessLookupError):
+            alive = False
+        # Has a feedback file appeared for this dispatch?
+        record = _find_feedback(log_dir, dispatch_id)
+        if record is not None:
+            return record
+        if not alive:
+            # Worker is gone; one more quick scan, then give up.
+            time.sleep(0.1)
+            return _find_feedback(log_dir, dispatch_id)
+        time.sleep(0.25)
+    return None
+
+
+def _find_feedback(log_dir, dispatch_id):
+    """Find a feedback file in ``log_dir`` whose record matches ``dispatch_id``.
+
+    Feedback files are written by ``odysseus.write_feedback`` at the end
+    of a mission and have names like ``<timestamp_ms>.jsonl``. We exclude
+    the dedup ledger (``dispatch-dedup.jsonl``) and any other file that
+    happens to live in the log dir — feedback files are pure-timestamp
+    names by convention.
+    """
+    import os
+    log_path = pathlib.Path(log_dir)
+    if not log_path.is_dir():
+        return None
+    candidates = sorted(
+        (p for p in log_path.glob("*.jsonl")
+         if p.name != "dispatch-dedup.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for fp in candidates:
+        try:
+            rec = json.loads(fp.read_text(encoding="utf-8").strip().splitlines()[-1])
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if rec.get("dispatch_id") == dispatch_id:
+            return rec
+    return None
+
+
+def _ledger_lookup(dispatch_id):
+    """Return the dedup-ledger entry for ``dispatch_id`` or None."""
+    import pathlib as _pl
+    project_dir = _pl.Path(__file__).parent.parent.resolve()
+    for candidate in (globals().get("MISSION_LOG_DIR"),
+                      project_dir / ".credit-lab" / "ody"):
+        if candidate is None:
+            continue
+        ledger_path = _pl.Path(candidate) / "dispatch-dedup.jsonl"
+        if not ledger_path.exists():
+            continue
+        try:
+            for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("dispatch_id") == dispatch_id:
+                    return rec
+        except OSError:
+            continue
+    return None
+
+
 async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict:
-    """Launch src/odysseus.py as a detached background subprocess."""
+    """Launch src/odysseus.py as a detached background subprocess.
+
+    Optional args:
+        wait: bool   — if True, block until the worker exits (or wait_timeout)
+                       and return the feedback record in ``feedback``.
+        wait_timeout: int — seconds to wait when wait=True. Default 60.
+    """
     import datetime
     import hashlib
     import pathlib
@@ -4181,6 +4272,8 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
     lane = args.get("lane")
     hybrid = args.get("hybrid")
     timeout = int(args.get("timeout") or 900)
+    wait = bool(args.get("wait", False))
+    wait_timeout = int(args.get("wait_timeout") or 60)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = pathlib.Path(globals().get(
@@ -4224,6 +4317,10 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
         cmd += ["--hybrid", hybrid]
 
     ledger = open(ledger_path, "a+")
+    # Compute the dispatch_id up front so we can pass it to the worker via
+    # the ODY_DISPATCH_ID env var (used by write_feedback to stamp the
+    # feedback record, which do_dispatch_status then matches on).
+    dispatch_id = f"d_{ts}_{uuid.uuid4().hex[:8]}"
     try:
         if fcntl is not None:
             fcntl.flock(ledger.fileno(), fcntl.LOCK_EX)
@@ -4253,10 +4350,14 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
                 stderr=log_file,
                 start_new_session=True,
                 cwd=project_dir,
+                env={
+                    **os.environ,
+                    "ODY_DISPATCH_ID": dispatch_id,
+                    "ODY_FEEDBACK_DIR": str(log_dir),
+                },
             )
         finally:
             log_file.close()
-        dispatch_id = f"d_{ts}_{uuid.uuid4().hex[:8]}"
         ledger.write(json.dumps({
             "dispatch_id": dispatch_id,
             "key": key,
@@ -4265,13 +4366,27 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
             "ts": now,
         }, sort_keys=True) + "\n")
         ledger.flush()
-        return {
+        result = {
             "output": f"Mission dispatched (pid={proc.pid}). Log: {log_path}",
             "exit_code": 0,
             "pid": proc.pid,
             "log": log_path,
             "dispatch_id": dispatch_id,
+            "wait": wait,
         }
+        if not wait:
+            return result
+        # wait=True: poll until the worker exits AND a feedback file
+        # appears, or wait_timeout elapses. The feedback file is the
+        # canonical "I'm done" signal — the worker writes it via
+        # write_feedback() at the end of do_code / do_analyze / do_research.
+        feedback = _wait_for_feedback(
+            log_dir, dispatch_id, proc, wait_timeout,
+        )
+        result["finished"] = feedback is not None
+        if feedback is not None:
+            result["feedback"] = feedback
+        return result
     except Exception as e:
         return {"error": f"dispatch_mission: {e}", "exit_code": 1}
     finally:
@@ -4281,6 +4396,121 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
             except OSError:
                 pass
         ledger.close()
+
+
+async def do_dispatch_status(content: str, owner: Optional[str] = None) -> Dict:
+    """Return the current state of a dispatched mission.
+
+    Looks up the dedup ledger for ``dispatch_id`` and reports:
+      - pid, log path, dispatch timestamp
+      - whether the pid is still alive
+      - the latest feedback record matching this dispatch (if any)
+
+    Use this instead of polling .credit-lab/ody/ from a separate shell.
+    """
+    import os as _os
+    import pathlib as _pl
+
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    dispatch_id = args.get("dispatch_id")
+    if not dispatch_id:
+        return {"error": "do_dispatch_status: dispatch_id is required",
+                "exit_code": 1}
+
+    ledger = _ledger_lookup(dispatch_id)
+    if ledger is None:
+        return {"error": f"unknown dispatch_id: {dispatch_id}",
+                "exit_code": 1}
+
+    pid = ledger.get("pid")
+    log = ledger.get("log")
+    ts = ledger.get("ts")
+    alive = True
+    if pid:
+        try:
+            _os.kill(int(pid), 0)
+        except (OSError, ProcessLookupError, ValueError):
+            alive = False
+
+    # Find the latest feedback for this dispatch in the ledger's log dir.
+    project_dir = _pl.Path(__file__).parent.parent.resolve()
+    log_dir = _pl.Path(globals().get(
+        "MISSION_LOG_DIR",
+        project_dir / ".credit-lab" / "ody",
+    ))
+    feedback = _find_feedback(log_dir, dispatch_id)
+
+    return {
+        "exit_code": 0,
+        "dispatch_id": dispatch_id,
+        "pid": pid,
+        "pid_alive": alive,
+        "log": log,
+        "ts": ts,
+        "finished": feedback is not None,
+        "feedback": feedback,
+    }
+
+
+async def do_dispatch_log_tail(content: str, owner: Optional[str] = None) -> Dict:
+    """Return the tail of a dispatched mission's worker log.
+
+    Args:
+        dispatch_id: str   — required, the dispatch to tail
+        since_bytes: int   — return content after this offset (default 0)
+        max_bytes:   int   — cap the returned content (default 64KB)
+
+    This is the streaming counterpart to do_dispatch_status: poll it in a
+    loop with since_bytes = the previous response's total_bytes to get a
+    live tail without re-reading the whole log.
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    dispatch_id = args.get("dispatch_id")
+    if not dispatch_id:
+        return {"error": "do_dispatch_log_tail: dispatch_id is required",
+                "exit_code": 1}
+    since_bytes = int(args.get("since_bytes") or 0)
+    max_bytes = int(args.get("max_bytes") or 65536)
+
+    ledger = _ledger_lookup(dispatch_id)
+    if ledger is None:
+        return {"error": f"unknown dispatch_id: {dispatch_id}",
+                "exit_code": 1}
+    log_path = pathlib.Path(ledger["log"])
+    if not log_path.exists():
+        return {"error": f"log file does not exist: {log_path}",
+                "exit_code": 1,
+                "dispatch_id": dispatch_id,
+                "log": str(log_path),
+                "total_bytes": 0,
+                "content": ""}
+
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            f.seek(min(since_bytes, size))
+            data = f.read(max_bytes)
+        content = data.decode("utf-8", errors="replace")
+    except OSError as e:
+        return {"error": f"read failed: {e}", "exit_code": 1,
+                "dispatch_id": dispatch_id, "log": str(log_path)}
+
+    return {
+        "exit_code": 0,
+        "dispatch_id": dispatch_id,
+        "log": str(log_path),
+        "start_byte": min(since_bytes, size),
+        "total_bytes": size,
+        "content": content,
+    }
 
 
 async def do_list_missions(content: str, owner: Optional[str] = None) -> Dict:
