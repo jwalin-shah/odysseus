@@ -1126,6 +1126,7 @@ async def execute_tool_block(
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
+        do_dispatch_mission, do_list_missions,
     )
 
     tool = block.tool_type
@@ -1344,6 +1345,12 @@ async def execute_tool_block(
     elif tool == "vault_unlock":
         desc = "vault_unlock"
         result = await do_vault_unlock(content, owner=owner)
+    elif tool == "dispatch_mission":
+        desc = "dispatch_mission"
+        result = await do_dispatch_mission(content, owner=owner)
+    elif tool == "list_missions":
+        desc = "list_missions"
+        result = await do_list_missions(content, owner=owner)
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()

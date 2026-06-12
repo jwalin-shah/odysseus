@@ -1108,6 +1108,39 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "dispatch_mission",
+            "description": "Spawns a bounded coding/analysis/research mission as a detached background worker. Worktree + test-gate for code lane; green commits land on ody-* branches. M3 never writes code directly. Returns immediately — use list_missions to check outcomes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mission": {"type": "string", "description": "Mission description"},
+                    "repo": {"type": "string", "description": "Repo directory (defaults to odysseus project dir)"},
+                    "test": {"type": "string", "description": "Test command for code lane (default: pytest -q)"},
+                    "lane": {"type": "string", "enum": ["code", "analyze", "research"], "description": "Mission lane"},
+                    "hybrid": {"type": "string", "description": "Hybrid file:func spec"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 900)"}
+                },
+                "required": ["mission"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_missions",
+            "description": "Lists recent mission outcomes from .credit-lab/ody/. Returns records with ts, prompt, lane, agent_used, test_passed, branch, quota_remaining, duration fields, newest first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max records to return (default: 10)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "mark_email_read",
             "description": "Mark one email as read or unread by UID. For multiple messages, use bulk_email instead. Always pass account when the email came from a named account such as Gmail.",
             "parameters": {
@@ -1300,7 +1333,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
-                        "manage_tokens", "manage_documents", "manage_settings"):
+                        "manage_tokens", "manage_documents", "manage_settings",
+                        "dispatch_mission", "list_missions"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

@@ -4146,3 +4146,110 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
         pass
 
     return {"output": "Vault unlocked. Session saved.", "exit_code": 0}
+
+
+# ---------------------------------------------------------------------------
+# Mission tools
+# ---------------------------------------------------------------------------
+
+async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict:
+    """Launch src/odysseus.py as a detached background subprocess."""
+    import asyncio
+    import datetime
+    import pathlib
+    import subprocess
+
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    mission = args.get("mission", "").strip()
+    if not mission:
+        return {"error": "dispatch_mission: mission is required", "exit_code": 1}
+
+    project_dir = str(pathlib.Path(__file__).parent.parent.resolve())
+    repo = args.get("repo") or project_dir
+    test = args.get("test") or "pytest -q"
+    lane = args.get("lane")
+    hybrid = args.get("hybrid")
+    timeout = int(args.get("timeout") or 900)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = pathlib.Path(project_dir) / ".credit-lab" / "ody"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = str(log_dir / f"app-dispatch-{ts}.log")
+
+    cmd = [
+        "python3", f"{project_dir}/src/odysseus.py",
+        mission,
+        "--repo", repo,
+        "--test", test,
+        "--timeout", str(timeout),
+    ]
+    if lane:
+        cmd += ["--lane", lane]
+    if hybrid:
+        cmd += ["--hybrid", hybrid]
+
+    try:
+        log_file = open(log_path, "w")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+            cwd=project_dir,
+        )
+        return {"output": f"Mission dispatched (pid={proc.pid}). Log: {log_path}", "exit_code": 0, "pid": proc.pid, "log": log_path}
+    except Exception as e:
+        return {"error": f"dispatch_mission: {e}", "exit_code": 1}
+
+
+async def do_list_missions(content: str, owner: Optional[str] = None) -> Dict:
+    """List recent mission outcomes from .credit-lab/ody/ .jsonl files."""
+    import pathlib
+
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    limit = int(args.get("limit") or 10)
+    limit = max(1, min(limit, 100))
+
+    project_dir = pathlib.Path(__file__).parent.parent.resolve()
+    ody_dir = project_dir / ".credit-lab" / "ody"
+
+    if not ody_dir.exists():
+        return {"output": "[]", "exit_code": 0, "records": []}
+
+    try:
+        jsonl_files = sorted(
+            ody_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception as e:
+        return {"error": f"list_missions: {e}", "exit_code": 1}
+
+    records = []
+    for f in jsonl_files:
+        if len(records) >= limit:
+            break
+        try:
+            lines = f.read_text(encoding="utf-8").strip().splitlines()
+            for line in reversed(lines):
+                if line.strip():
+                    try:
+                        rec = json.loads(line)
+                        records.append(rec)
+                        if len(records) >= limit:
+                            break
+                    except json.JSONDecodeError:
+                        pass
+        except Exception:
+            pass
+
+    records = records[:limit]
+    return {"output": json.dumps(records, indent=2, default=str), "exit_code": 0, "records": records}

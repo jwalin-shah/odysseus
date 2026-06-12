@@ -174,6 +174,11 @@ _TOOL_NAME_MAP = {
     "notes": "manage_notes",
     "todo": "manage_notes",
     "todos": "manage_notes",
+    "dispatch_mission": "dispatch_mission",
+    "launch_mission": "dispatch_mission",
+    "run_mission": "dispatch_mission",
+    "list_missions": "list_missions",
+    "missions": "list_missions",
 }
 
 
