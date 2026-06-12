@@ -124,18 +124,19 @@ def test_do_ody_supervisor_passes_action_first():
         # Pull out the supervisor module + flags from the captured argv.
         # args is: (python, "-m", "src.ody_supervisor", *flags)
         argv = list(captured["argv"])
-        # We launch via `python -c "..."` + runpy.run_module('src.ody_supervisor').
-        # The argv we capture is (python, -c, <inline>, action, *flags).
+        # We launch via `python -m src.ody_supervisor ...`. Verify the
+        # module is invoked and the action is the first positional.
         assert any("src.ody_supervisor" in a for a in argv[:3]), (
             f"supervisor module not invoked: {argv}"
         )
-        # action is the first positional after the -c inline
-        assert argv[3] == "enqueue", (
-            f"action 'enqueue' must be the first positional after the inline, "
-            f"got {argv[3]!r}"
+        mod_idx = next(
+            i for i, a in enumerate(argv) if "src.ody_supervisor" in a
         )
-        # flags follow
-        flag_str = " ".join(argv[4:])
+        assert argv[mod_idx + 1] == "enqueue", (
+            f"action 'enqueue' must be the first positional after the module, "
+            f"got {argv[mod_idx + 1]!r}"
+        )
+        flag_str = " ".join(argv[mod_idx + 2:])
         assert "--mission" in flag_str and "fix the bug" in flag_str
         assert "--test" in flag_str and "pytest -q" in flag_str
         assert "--max-attempts" in flag_str and "3" in flag_str

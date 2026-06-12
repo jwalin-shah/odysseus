@@ -403,3 +403,7 @@ def supervise_main(argv=None, supervisor_cls=Supervisor):
         time.sleep(max(1, args.interval))
     print(json.dumps(totals, sort_keys=True))
     return 1 if totals["failed"] else 0
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(supervise_main())
