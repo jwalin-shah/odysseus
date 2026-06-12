@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import asyncio
 from typing import Any, Dict, List, Optional
 
@@ -4737,3 +4738,86 @@ async def do_supervise_missions(content: str, owner: Optional[str] = None) -> Di
     proc = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True)
     return {"output": (proc.stdout or proc.stderr).strip(),
             "exit_code": proc.returncode}
+
+
+async def do_ody_supervisor(content: str, owner: Optional[str] = None) -> Dict:
+    """Thin chat-tool wrapper around ody_supervisor.supervise_main().
+
+    The supervisor already has a CLI (supervise_main(argv)). This wrapper
+    translates a JSON content block into the right argv, runs the
+    supervisor synchronously, and returns the JSON the supervisor prints
+    (or a structured error if it raised).
+
+    Args (content JSON):
+        action: status | enqueue | propose | run  (required)
+        mission: str  (for enqueue)
+        repo:    str  (default: cwd)
+        test:    str  (default: pytest -q)
+        evidence: list[str]  (for propose)
+        max_missions: int  (1..20)
+        max_attempts: int   (1..5)
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    action = args.get("action")
+    if action not in {"status", "enqueue", "propose", "run"}:
+        return {
+            "error": f"ody_supervisor: action must be one of "
+                     f"status|enqueue|propose|run; got {action!r}",
+            "exit_code": 1,
+        }
+
+    # Build argv: action first (positional), then --flag value pairs.
+    argv = [action]
+    for k, v in args.items():
+        if k == "action" or v is None:
+            continue
+        flag = "--" + k.replace("_", "-")
+        if isinstance(v, list):
+            for item in v:
+                argv += [flag, str(item)]
+        else:
+            argv += [flag, str(v)]
+
+    try:
+        from src.ody_supervisor import supervise_main
+    except Exception as e:
+        return {"error": f"ody_supervisor: import failed: {e}", "exit_code": 1}
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c",
+        "import sys, runpy; sys.argv=['ody_supervisor']+sys.argv[1:]; "
+        "runpy.run_module('src.ody_supervisor', run_name='__main__')",
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(pathlib.Path(__file__).parent.parent.resolve()),
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        return {"error": "ody_supervisor: timeout after 60s", "exit_code": 124}
+
+    stdout = out.decode(errors="replace").strip()
+    stderr = err.decode(errors="replace").strip()
+
+    # supervise_main prints JSON to stdout; try to parse it back.
+    parsed = None
+    for line in stdout.splitlines()[::-1]:
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                parsed = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+
+    return {
+        "exit_code": proc.returncode,
+        "action": action,
+        "result": parsed if parsed is not None else stdout,
+        "stderr": stderr[:2000] if stderr else "",
+    }

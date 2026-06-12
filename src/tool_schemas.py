@@ -1193,6 +1193,26 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "ody_supervisor",
+            "description": "Control the bounded self-improvement supervisor: enqueue a mission, propose from blueprint/mining evidence, run cycles, or check status. The supervisor is the bounded queue that turns blueprint/mining evidence into dispatched missions. Proposes and enqueues only; proposals land via dispatch_mission. Never merges or deploys.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "enqueue", "propose", "run"], "description": "What to do. status = queue + ledger snapshot. enqueue = add a single mission. propose = derive candidates from evidence. run = drain the queue through test_author/implementer/red_team cycles."},
+                    "mission": {"type": "string", "description": "For action=enqueue: the mission description."},
+                    "repo": {"type": "string", "description": "Repo directory (defaults to the odysseus project dir)."},
+                    "test": {"type": "string", "description": "Test command (default: pytest -q)."},
+                    "evidence": {"type": "array", "items": {"type": "string"}, "description": "For action=propose: paths to GRADES.md / FINDINGS.md / FABLE_BLUEPRINT.md (default: the canonical set)."},
+                    "max_missions": {"type": "integer", "minimum": 1, "maximum": 20, "description": "For action=propose|run: cap on how many to process."},
+                    "max_attempts": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Per-mission retry cap."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "mark_email_read",
             "description": "Mark one email as read or unread by UID. For multiple messages, use bulk_email instead. Always pass account when the email came from a named account such as Gmail.",
             "parameters": {
@@ -1387,7 +1407,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
                         "manage_tokens", "manage_documents", "manage_settings",
                         "dispatch_mission", "list_missions", "supervise_missions",
-                        "tla_chat", "tla_quota"):
+                        "tla_chat", "tla_quota",
+                        "ody_supervisor"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

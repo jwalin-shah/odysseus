@@ -62,6 +62,11 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "app_api",
              # Odysseus mission tools
              "dispatch_mission", "list_missions", "supervise_missions",
+             # The bounded self-improvement supervisor's CLI surface.
+             # Backs the same supervise_main() entry point as supervise_missions
+             # but is registered as its own tool so the chat UI / settings panel
+             # can show it and toggle it independently.
+             "ody_supervisor",
              # Per-agent direct chat + canonical quota (no worktree, no test gate)
              "tla_chat", "tla_quota"}
 

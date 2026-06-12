@@ -31,6 +31,11 @@ ALWAYS_AVAILABLE = frozenset({
     # no worktree / no test gate. Useful for one-off questions to
     # ca/cb/codex/gemini/agy/m3 without burning a mission slot.
     "tla_chat", "tla_quota",
+    # The bounded self-improvement supervisor: enqueue, propose from
+    # blueprint/mining evidence, run cycles, check status. Always on
+    # because the supervisor is what turns background evidence into
+    # missions; RAG shouldn't be able to hide it.
+    "ody_supervisor",
     # File tools: read AND write/edit. An agent with disk access should always
     # be able to change files, not just read them — otherwise a bare "edit X"
     # request can miss write_file/edit_file (RAG-only) and the model wrongly
@@ -78,6 +83,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "supervise_missions": "Control the bounded Odysseus self-improvement queue: propose missions from blueprint/mining evidence, enqueue a mission, run test-author/implementer/red-team cycles, or inspect supervisor status.",
     "tla_chat": "Send a one-off message to a specific coding/analysis agent (claude, ca, cb, cc, codex, gemini, agy, m3, opencode-opus) and return its response. No worktree, no test gate — just a direct chat. Use for 'ask claude', 'have m3 review this', 'send a prompt to ca', 'what does codex think of X'. NOT for code work that needs a worktree or test gate (use dispatch_mission).",
     "tla_quota": "Read the canonical subscription-agent quota status from /Users/jwalinshath/bin/quota (returns JSON for claude-a, claude-b, pioneer, codex, cursor, gemini, agy). Use before a flood of dispatches to know which agents still have budget, or to debug a 'no verified source' message in the live quota output.",
+    "ody_supervisor": "Control the bounded self-improvement supervisor: enqueue a mission, propose from blueprint/mining evidence, run cycles, or check status. The supervisor is the bounded queue that turns blueprint/mining evidence into dispatched missions. Use for 'run the supervisor', 'check the queue', 'propose missions from the blueprint'. Never merges or deploys — proposals only land via dispatch_mission.",
     "bash": "Run shell commands on the server. Install packages, check files, git operations, curl, system info, process management, networking.",
     "python": "Execute Python code for computation, data processing, math, scripting, parsing, API calls. Not for writing code for the user.",
     "web_search": "Quick single web lookup for a fact, current event, or doc mid-task. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",

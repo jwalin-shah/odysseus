@@ -1128,6 +1128,7 @@ async def execute_tool_block(
         do_app_api,
         do_dispatch_mission, do_list_missions, do_supervise_missions,
         do_tla_chat, do_tla_quota,
+        do_ody_supervisor,
     )
 
     tool = block.tool_type
@@ -1361,6 +1362,9 @@ async def execute_tool_block(
     elif tool == "tla_quota":
         desc = "tla_quota"
         result = await do_tla_quota(content, owner=owner)
+    elif tool == "ody_supervisor":
+        desc = "ody_supervisor"
+        result = await do_ody_supervisor(content, owner=owner)
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()
