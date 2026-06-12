@@ -65,6 +65,8 @@ COLLECTION_NAME = "odysseus_tool_index"
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
+    "dispatch_mission": "Spawn a bounded background coding/analysis/research worker (odysseus mission): fix a bug, make tests pass, review code, find papers. Runs in an isolated git worktree with a test gate; green results land on ody-* branches. Use for 'fix X', 'spawn a worker', 'run a mission', 'have an agent do X'.",
+    "list_missions": "Check outcomes of dispatched odysseus missions: prompt, lane, agent used, test_passed verdict, branch, quota remaining. Use after dispatch_mission or when asked 'how did the mission go' / 'what workers ran'.",
     "bash": "Run shell commands on the server. Install packages, check files, git operations, curl, system info, process management, networking.",
     "python": "Execute Python code for computation, data processing, math, scripting, parsing, API calls. Not for writing code for the user.",
     "web_search": "Quick single web lookup for a fact, current event, or doc mid-task. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
