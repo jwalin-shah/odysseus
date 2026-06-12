@@ -14,11 +14,18 @@ import argparse
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
+
+try:
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CTX = ssl.create_default_context()
 
 ODY_HOME = os.path.expanduser(os.environ.get("ODY_HOME", "~/projects/odysseus"))
 FEEDBACK_DIR = os.path.join(ODY_HOME, ".credit-lab", "ody")
@@ -118,7 +125,7 @@ def run_tool(tool, prompt, cwd, timeout):
 def do_research(mission, args):
     q = urllib.parse.quote(mission)
     url = f"https://export.arxiv.org/api/query?search_query=all:{q}&max_results=10"
-    with urllib.request.urlopen(url, timeout=30) as r:
+    with urllib.request.urlopen(url, timeout=30, context=SSL_CTX) as r:
         feed = r.read().decode()
     titles = [seg.split("</title>")[0].strip()
               for seg in feed.split("<title>")[2:]]  # first <title> is the feed's own
