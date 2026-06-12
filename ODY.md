@@ -4,13 +4,23 @@ One command. It routes, isolates, gates, and logs. You talk to `ody`; it talks
 to everything else.
 
 ```bash
+ody chat                                            # THE place you talk: app chat (:7860)
+ody pilot                                           # interim terminal orchestrator (claude + ORCHESTRATOR.md)
 ody 'fix the failing test in v2/src/sys_quota.py'   # code lane
 ody 'review the v2 router for security'             # analyze lane (M3 direct)
-ody 'find arxiv papers on agent routing'            # research lane (arxiv API)
+ody 'find arxiv papers on agent routing'            # research lane (arxiv + M3 synthesis)
+ody run '<mission>' --hybrid FILE:FUNC ...          # M3 drafts func body, AST splice, gate
 ody run '<mission>' --repo DIR --test 'pytest -q'   # explicit form + options
 ody ask --pane current 'what is happening'          # tmux observability (v1)
 ody start|stop|status|logs|sessions                 # v1 app, unchanged
 ```
+
+Routing: M3 picks the lane per mission (free, ~2s; `ODY_ROUTER=keyword` to
+disable). Tool choice stays in the hard-coded waterfalls so M3 can never route
+code to itself. Quota: per-tool daily call budgets in sys-quota
+(`.credit-lab/quota.db`), deducted per dispatch, `quota_remaining` in every
+feedback record. Pioneer key auto-resolves from Infisical
+(`/providers/pioneer`) for opencode dispatches and the `cpio` launcher.
 
 ## Lanes
 

@@ -62,3 +62,30 @@ def test_feedback_record_roundtrip(tmp_path, monkeypatch):
 def test_docs_preamble_respects_total_cap():
     docs = odysseus.load_docs()
     assert len(docs) <= odysseus.DOCS_TOTAL_CAP + len(odysseus.DOCS) * 50
+
+
+def test_route_keyword_fallback_env(monkeypatch):
+    monkeypatch.setenv("ODY_ROUTER", "keyword")
+    assert odysseus.route("fix the bug") == ("code", "keyword")
+
+
+def test_hybrid_patch_splices_function(tmp_path, monkeypatch):
+    import m3
+    f = tmp_path / "calc.py"
+    f.write_text("def add(a, b):\n    return a - b\n\nX = 1\n")
+    monkeypatch.setattr(m3, "complete",
+                        lambda *a, **k: "def add(a, b):\n    return a + b\n")
+    rc, out, err = odysseus.hybrid_patch(str(tmp_path), "calc.py:add", "fix add")
+    assert rc == 0, err
+    assert "return a + b" in f.read_text() and "X = 1" in f.read_text()
+
+
+def test_hybrid_patch_rejects_wrong_function(tmp_path, monkeypatch):
+    import m3
+    f = tmp_path / "calc.py"
+    f.write_text("def add(a, b):\n    return a - b\n")
+    monkeypatch.setattr(m3, "complete",
+                        lambda *a, **k: "def sub(a, b):\n    return a - b\n")
+    rc, _, err = odysseus.hybrid_patch(str(tmp_path), "calc.py:add", "fix")
+    assert rc == 1 and "did not return" in err
+    assert "a - b" in f.read_text()
