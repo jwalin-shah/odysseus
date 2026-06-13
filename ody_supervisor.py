@@ -50,6 +50,45 @@ def handle_task(task: str, base_prompt: Optional[str] = None) -> dict:
     return {"system": system_prompt, "task": task}
 
 
+def route_task(task: str, project: Optional[str] = None) -> dict:
+    """Classify ``task`` and return a routing payload.
+
+    Classification uses simple keyword matching (case-insensitive,
+    first-match-wins) to assign the task to one of four worker
+    kinds:
+
+    * ``'impl'``      — implement a pure function
+    * ``'research'``  — research a topic
+    * ``'repo_edit'`` — edit files in a repo
+    * ``'question'``  — answer directly
+
+    The returned dict has keys ``worker`` (the classification),
+    ``system`` (built via :func:`build_system_prompt` so the
+    downstream worker still receives the microagent-augmented
+    context), and ``task`` (the original task string).
+
+    The ``project`` parameter is accepted for API symmetry with
+    future routing logic but is not currently used.
+    """
+    task_lower = task.lower()
+
+    impl_keywords = ("implement", "write a function", "def ")
+    research_keywords = ("research", "find", "how does", "what is")
+    repo_edit_keywords = ("fix", "edit", "update", "wire", "add to")
+
+    if any(kw in task_lower for kw in impl_keywords):
+        worker = "impl"
+    elif any(kw in task_lower for kw in research_keywords):
+        worker = "research"
+    elif any(kw in task_lower for kw in repo_edit_keywords):
+        worker = "repo_edit"
+    else:
+        worker = "question"
+
+    system_prompt = build_system_prompt(task)
+    return {"worker": worker, "system": system_prompt, "task": task}
+
+
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.DEBUG)
