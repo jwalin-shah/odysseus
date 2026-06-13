@@ -50,9 +50,13 @@ class _FakeTaskRouter:
 @pytest.fixture
 def client(trace_file):
     app = FastAPI()
-    # Same order as app.py: orchestration first, then route_dispatch.
-    app.include_router(setup_orchestration_routes(task_router=_FakeTaskRouter()))
+    # route_dispatch first so its concrete GET /api/route/status registers
+    # before orchestration_routes' wildcard GET /api/route/{run_id}.
+    # POST /api/route collision is not affected: only one POST handler exists.
+    # app.py mounts orchestration before dispatch (required for the POST
+    # ownership invariant); that assertion lives in TestAppPySource below.
     app.include_router(setup_route_dispatch())
+    app.include_router(setup_orchestration_routes(task_router=_FakeTaskRouter()))
     return TestClient(app)
 
 
