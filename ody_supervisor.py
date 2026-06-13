@@ -52,6 +52,51 @@ def handle_task(task: str, base_prompt: Optional[str] = None) -> dict:
     return {"system": system_prompt, "task": task}
 
 
+def route_task(task: str, project: Optional[str] = None) -> dict:
+    """Classify ``task`` and return a worker-routing payload.
+
+    Classification is a simple keyword scan over the lowercased task:
+
+    * ``impl``      -- ``implement``, ``write a function``, ``def ``
+    * ``research``  -- ``research``, ``find``, ``how does``, ``what is``
+    * ``repo_edit`` -- ``fix``, ``edit``, ``update``, ``wire``, ``add to``
+    * ``question``  -- anything else
+
+    The returned dict carries the chosen ``worker`` name, the
+    context-augmented system prompt assembled by
+    :func:`build_system_prompt`, and the original ``task``. The
+    ``project`` argument is accepted for API symmetry with future
+    routing logic but is not consulted by the keyword classifier.
+    """
+    lowered = task.lower()
+    if (
+        "implement" in lowered
+        or "write a function" in lowered
+        or "def " in lowered
+    ):
+        worker = "impl"
+    elif (
+        "research" in lowered
+        or "find" in lowered
+        or "how does" in lowered
+        or "what is" in lowered
+    ):
+        worker = "research"
+    elif (
+        "fix" in lowered
+        or "edit" in lowered
+        or "update" in lowered
+        or "wire" in lowered
+        or "add to" in lowered
+    ):
+        worker = "repo_edit"
+    else:
+        worker = "question"
+
+    system_prompt = build_system_prompt(task)
+    return {"worker": worker, "system": system_prompt, "task": task}
+
+
 def get_project_context(hint: Optional[str] = None) -> str:  # hint=None
     """Return a compact project context string (max 400 chars).
 
