@@ -9,6 +9,8 @@ handler.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from typing import Optional
 
 import microagent_router
@@ -48,6 +50,80 @@ def handle_task(task: str, base_prompt: Optional[str] = None) -> dict:
     """
     system_prompt = build_system_prompt(task, base=base_prompt)
     return {"system": system_prompt, "task": task}
+
+
+def get_project_context(hint: Optional[str] = None) -> str:
+    """Return a compact project context string (max 400 chars).
+
+    Scans ``~/projects`` and ``~/m3lab`` for git repositories, runs
+    ``git log --oneline -3`` in each to capture the last 3 commits,
+    and returns the best match.
+
+    If ``hint`` is provided, repos are scored by the number of
+    case-insensitive words from ``hint`` that appear in the repo
+    name; the highest-scoring repo's name plus its last 3 commits is
+    returned. If no hint is given, or no repo scores positively, the
+    function falls back to a comma-separated list of all discovered
+    repo names.
+
+    All subprocess and filesystem errors are swallowed so a broken
+    repo never breaks callers.
+    """
+    home = os.path.expanduser("~")
+    search_dirs = [os.path.join(home, "projects"), os.path.join(home, "m3lab")]
+
+    repos = []
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in entries:
+            repo_path = os.path.join(directory, entry)
+            if not os.path.isdir(repo_path):
+                continue
+            if not os.path.isdir(os.path.join(repo_path, ".git")):
+                continue
+            try:
+                result = subprocess.run(
+                    ["git", "log", "--oneline", "-3"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                commits = result.stdout.strip() if result.returncode == 0 else ""
+            except Exception:
+                commits = ""
+            repos.append((entry, commits))
+
+    if not repos:
+        return ""
+
+    if not hint:
+        names = ", ".join(name for name, _ in repos)
+        return f"Projects: {names}"[:400]
+
+    hint_words = [w.lower() for w in hint.split() if w]
+    scored = []
+    for name, commits in repos:
+        name_lower = name.lower()
+        score = sum(1 for w in hint_words if w and w in name_lower)
+        scored.append((score, name, commits))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored or scored[0][0] == 0:
+        names = ", ".join(name for name, _ in repos)
+        return f"Projects: {names}"[:400]
+
+    best_name, best_commits = scored[0][1], scored[0][2]
+    if best_commits:
+        context = f"Project: {best_name}\nRecent commits:\n{best_commits}"
+    else:
+        context = f"Project: {best_name}"
+    return context[:400]
 
 
 def route_task(task: str, project: Optional[str] = None) -> dict:
