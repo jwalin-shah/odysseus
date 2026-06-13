@@ -52,7 +52,7 @@ def handle_task(task: str, base_prompt: Optional[str] = None) -> dict:
     return {"system": system_prompt, "task": task}
 
 
-def get_project_context(hint: Optional[str] = None) -> str:
+def get_project_context(hint: Optional[str] = None) -> str:  # hint=None
     """Return a compact project context string (max 400 chars).
 
     Scans ``~/projects`` and ``~/m3lab`` for git repositories, runs
