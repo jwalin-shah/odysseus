@@ -85,14 +85,16 @@ if __name__ == "__main__":
         (0xAAAAAAAA, 0x55555555),     # swap of alternating pattern
         (0x55555555, 0xAAAAAAAA),     # inverse of the above
         (0xFFFFFFFF, 0xFFFFFFFF),     # all ones is invariant
-        (0x0000000F, 0x0000000F),     # 0b1111: pairs (0,1) and (2,3) are (1,1) -> invariant
-        (0x000000F0, 0x000000F0),     # 0b11110000: pairs (4,5) and (6,7) are (1,1) -> invariant
-        (0x12345678, 0x2138a9b4),     # non-trivial case verified computationally
+        (0x0000000F, 0x0000000F),     # 0b1111 -> 0b1111
+        (0x000000F0, 0x000000F0),     # 0b11110000 -> 0b11110000
+        (0x12345678, 0x2138A9B4),     # general case
+        (-1, 0xFFFFFFFF),             # negative -> two's complement
+        (0x00010000, 0x00020000),     # single bit at an even pos
+        (0x00020000, 0x00010000),     # single bit at an odd pos
     ]
-    for _inp, _expected in _cases:
-        _got = swap_odd_even_bits(_inp)
-        assert _got == _expected, (
-            f"swap_odd_even_bits({_inp:#x}) = {_got:#x}, "
-            f"expected {_expected:#x}"
+    for inp, expected in _cases:
+        got = swap_odd_even_bits(inp)
+        assert got == expected, (
+            f"swap_odd_even_bits({inp:#x}) = {got:#x}, expected {expected:#x}"
         )
     print("All self-tests passed.")
