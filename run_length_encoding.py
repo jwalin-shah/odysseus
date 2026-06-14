@@ -9,7 +9,7 @@ def encode(s: str) -> str:
             count += 1
             i += 1
         if count > 1:
-            result.append(f"{count}{s[i]}")
+            result.append(str(count) + s[i])
         else:
             result.append(s[i])
         i += 1
