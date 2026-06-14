@@ -1,39 +1,70 @@
-"""Crockford Base32 encoding/decoding.
+"""Crockford Base32 encoding and decoding.
 
-Alphabet: 0123456789ABCDEFGHJKMNPQRSTVWXYZ (32 symbols, excludes I, L, O, U).
-Decode is case-insensitive and maps aliases: O/o→0, I/i/L/l→1.
+Crockford Base32 uses the alphabet:
+    0123456789ABCDEFGHJKMNPQRSTVWXYZ
+
+The letters I, L, O, and U are excluded to avoid visual ambiguity.
+I and L both decode to 1, and O decodes to 0. The encoding is
+case-insensitive and ignores hyphens and whitespace during decoding.
 """
 
-_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-_ENCODE_TABLE = {i: c for i, c in enumerate(_ALPHABET)}
-_DECODE_TABLE = {c: i for i, c in enumerate(_ALPHABET)}
-_DECODE_TABLE.update({"O": 0, "I": 1, "L": 1})
+import re
+
+CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+# Decoding map including common visual aliases
+_DECODE_MAP = {c: i for i, c in enumerate(CROCKFORD_ALPHABET)}
+_DECODE_MAP['I'] = 1
+_DECODE_MAP['L'] = 1
+_DECODE_MAP['O'] = 0
 
 
-def encode(n: int) -> str:
-    """Encode a non-negative integer to Crockford Base32."""
-    if not isinstance(n, int) or isinstance(n, bool):
-        raise TypeError(f"expected int, got {type(n).__name__}")
-    if n < 0:
-        raise ValueError("n must be non-negative")
-    if n == 0:
-        return "0"
-    chars = []
-    while n:
-        chars.append(_ENCODE_TABLE[n % 32])
-        n //= 32
-    return "".join(reversed(chars))
+def encode(data: bytes) -> str:
+    """Encode ``data`` to a Crockford Base32 string.
+
+    The output is left-padded with zero characters so that the encoded
+    length preserves the original byte count for non-zero-leading inputs.
+    """
+    if not data:
+        return ""
+    num = int.from_bytes(data, 'big')
+    # Number of base32 characters needed to hold the input bits.
+    num_chars = (len(data) * 8 + 4) // 5
+    if num == 0:
+        return CROCKFORD_ALPHABET[0] * num_chars
+    digits = []
+    temp = num
+    while temp > 0:
+        digits.append(CROCKFORD_ALPHABET[temp % 32])
+        temp //= 32
+    # Pad to ``num_chars`` with leading zeros (MSB side).
+    while len(digits) < num_chars:
+        digits.append(CROCKFORD_ALPHABET[0])
+    return ''.join(reversed(digits))
 
 
-def decode(s: str) -> int:
-    """Decode a Crockford Base32 string to a non-negative integer."""
-    if not isinstance(s, str):
-        raise TypeError(f"expected str, got {type(s).__name__}")
+def decode(s: str) -> bytes:
+    """Decode a Crockford Base32 string to bytes.
+
+    Hyphens and whitespace are ignored, and decoding is case-insensitive.
+    Raises ``ValueError`` on invalid characters.
+    """
     if not s:
-        raise ValueError("empty string")
-    result = 0
-    for ch in s.upper():
-        if ch not in _DECODE_TABLE:
-            raise ValueError(f"invalid character: {ch!r}")
-        result = result * 32 + _DECODE_TABLE[ch]
-    return result
+        return b""
+    s = re.sub(r'[-\s]', '', s).upper()
+    if not s:
+        return b""
+    num = 0
+    for c in s:
+        if c not in _DECODE_MAP:
+            raise ValueError(f"Invalid character: {c!r}")
+        num = num * 32 + _DECODE_MAP[c]
+    # Determine byte length: at least the minimum needed for the value,
+    # but also at least the byte count implied by the input length.
+    if num == 0:
+        min_bytes = 1
+    else:
+        min_bytes = (num.bit_length() + 7) // 8
+    expected_bytes = (len(s) * 5) // 8
+    length = max(min_bytes, expected_bytes)
+    return num.to_bytes(length, 'big')
