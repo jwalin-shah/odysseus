@@ -19,11 +19,11 @@ def nth_weekday(year, month, weekday, n):
                     0..6, ``n`` is not a positive integer, or the nth
                     occurrence does not exist within the month.
     """
-    if not isinstance(month, int) or not (1 <= month <= 12):
+    if not isinstance(month, int) or isinstance(month, bool) or not (1 <= month <= 12):
         raise ValueError(f"month must be an integer in 1..12, got {month!r}")
-    if not isinstance(weekday, int) or not (0 <= weekday <= 6):
+    if not isinstance(weekday, int) or isinstance(weekday, bool) or not (0 <= weekday <= 6):
         raise ValueError(f"weekday must be an integer in 0..6, got {weekday!r}")
-    if not isinstance(n, int) or n < 1:
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
         raise ValueError(f"n must be a positive integer, got {n!r}")
 
     first_day = date(year, month, 1)
