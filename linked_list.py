@@ -10,7 +10,7 @@ class Node:
     next: Optional["Node"] = field(default=None, repr=False, compare=False)
 
 
-class LinkedList:
+class SinglyLinkedList:
     """Singly linked list with O(1) head ops and O(n) tail/index ops."""
 
     def __init__(self) -> None:
@@ -28,7 +28,11 @@ class LinkedList:
             cur = cur.next
 
     def __repr__(self) -> str:
-        return "LinkedList([" + ", ".join(repr(v) for v in self) + "])"
+        return "SinglyLinkedList([" + ", ".join(repr(v) for v in self) + "])"
+
+    def to_list(self) -> list:
+        """Return a Python list of the values in order."""
+        return list(self)
 
     # ---------- core mutators ----------
 
