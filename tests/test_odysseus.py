@@ -43,7 +43,7 @@ def test_pick_skips_missing_clis(monkeypatch):
 def test_pick_skips_exhausted_quota(monkeypatch):
     monkeypatch.setattr(odysseus, "cli_exists", lambda t: True)
     monkeypatch.setattr(odysseus, "quota_ok", lambda t: t != "claude")
-    assert odysseus.pick(odysseus.CODE_WATERFALL) == "opencode-opus"
+    assert odysseus.pick(odysseus.CODE_WATERFALL) == "ca"
 
 
 def test_pick_returns_none_when_nothing_viable(monkeypatch):
@@ -67,6 +67,35 @@ def test_docs_preamble_respects_total_cap():
 def test_route_keyword_fallback_env(monkeypatch):
     monkeypatch.setenv("ODY_ROUTER", "keyword")
     assert odysseus.route("fix the bug") == ("code", "keyword")
+
+
+def test_run_subcommand_preserves_mission_args():
+    assert odysseus._operator_command(
+        ["run", "fix the bug", "--repo", "/tmp/repo"]
+    ) == ["fix the bug", "--repo", "/tmp/repo"]
+
+
+def test_sessions_subcommand_uses_tmux_helper(monkeypatch):
+    called = []
+    monkeypatch.setattr(odysseus, "_exec", called.append)
+    odysseus._operator_command(["sessions", "--json"])
+    assert called == [["ody-sessions", "--json"]]
+
+
+def test_status_subcommand_reports_health(monkeypatch, capsys):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"healthy": true, "checked_at": "now"}'
+
+    monkeypatch.setattr(odysseus.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    assert odysseus._operator_command(["status"]) == 0
+    assert '"healthy": true' in capsys.readouterr().out
 
 
 def test_hybrid_patch_splices_function(tmp_path, monkeypatch):
