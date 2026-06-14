@@ -68,7 +68,15 @@ def get_window_bounds():
     return bounds
 
 def _screencapture_window(window_id, out_path):
-    """Capture a single window by ID (macOS). Returns True on success."""
+    """Capture a single window by ID (macOS). Returns True on success.
+
+    Headless detection: when run from launchd (no Aqua session), screencapture
+    always fails with 'could not create image from display'. We detect that
+    early and bail with a clear status, rather than spamming the error log
+    every 10 minutes.
+    """
+    if _is_headless():
+        return False
     try:
         subprocess.run(["screencapture", "-l", str(window_id), "-x", out_path],
                        check=True)
@@ -76,6 +84,26 @@ def _screencapture_window(window_id, out_path):
     except subprocess.CalledProcessError as e:
         logger.error(f"screencapture -l{window_id} failed: {e}")
         return False
+
+
+def _is_headless():
+    """True if we have no display (running under launchd, SSH, etc.).
+
+    Detection: launchd processes have no Aqua session, so Quartz reports
+    kCGSSessionOnConsoleKey=0 in the System policy table. Fall back to
+    $DISPLAY (Linux convention) and PPID==1 (launchd parent).
+    """
+    if os.getppid() == 1 and not os.environ.get("TERM_PROGRAM"):
+        return True
+    if os.environ.get("DISPLAY") is None and sys.platform == "darwin":
+        # quick check via Quartz
+        try:
+            from Quartz import CGDisplayBounds  # type: ignore
+            CGDisplayBounds(0)  # raises if no display
+            return False
+        except Exception:
+            return True
+    return False
 
 
 def _find_models_window():
@@ -113,6 +141,11 @@ def grab_visual_quota():
     try:
         if BACKGROUND:
             logger.info("[bg] skipping activate + Settings; screencapturing existing window")
+            if _is_headless():
+                logger.info("[bg] running headless (launchd/SSH); skipping screencapture — "
+                            "open Antigravity manually and run quota_scraper.py --background "
+                            "from a Terminal session to refresh quota-live.json")
+                return None, None
             wid = WINDOW_ID or _find_models_window()
             if wid is None:
                 logger.error("[bg] could not find Antigravity window id; "

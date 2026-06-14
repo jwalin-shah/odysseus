@@ -4269,6 +4269,19 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
     if not mission:
         return {"error": "dispatch_mission: mission is required", "exit_code": 1}
 
+    brief = args.get("brief")
+    if brief is not None:
+        try:
+            from v2.src.mission_brief import MissionInvalid, validate
+            validate(brief)
+        except MissionInvalid as e:
+            return {
+                "error": f"dispatch_mission: {e.reason}",
+                "exit_code": 1,
+                "gate": "mission_brief",
+                "field": e.field,
+            }
+
     project_dir = str(pathlib.Path(__file__).parent.parent.resolve())
     repo = args.get("repo") or project_dir
     test = args.get("test") or "pytest -q"
@@ -4293,6 +4306,16 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
     )
     key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     now = time.time()
+
+    try:
+        from v2.src.preflight import PreflightBlocked, check
+        preflight = check(mission, lane or "auto", [])
+    except PreflightBlocked as e:
+        return {
+            "error": f"dispatch_mission: {e.reason}",
+            "exit_code": 1,
+            "gate": e.gate,
+        }
 
     # Use the project venv python when present; the system ``python3`` has no
     # pytest, no project deps, and breaks the worktree's ``pytest -q`` gate.
@@ -4364,6 +4387,7 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
         ledger.write(json.dumps({
             "dispatch_id": dispatch_id,
             "key": key,
+            "task_hash": preflight.task_hash,
             "pid": proc.pid,
             "log": log_path,
             "ts": now,
@@ -4375,6 +4399,7 @@ async def do_dispatch_mission(content: str, owner: Optional[str] = None) -> Dict
             "pid": proc.pid,
             "log": log_path,
             "dispatch_id": dispatch_id,
+            "task_hash": preflight.task_hash,
             "wait": wait,
         }
         if not wait:
@@ -4788,10 +4813,7 @@ async def do_ody_supervisor(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": f"ody_supervisor: import failed: {e}", "exit_code": 1}
 
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-c",
-        "import sys, runpy; sys.argv=['ody_supervisor']+sys.argv[1:]; "
-        "runpy.run_module('src.ody_supervisor', run_name='__main__')",
-        *argv,
+        sys.executable, "-m", "src.ody_supervisor", *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(pathlib.Path(__file__).parent.parent.resolve()),

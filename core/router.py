@@ -539,13 +539,7 @@ class TaskRouter:
         model = os.environ.get("CLAUDE_MODEL", "sonnet")
 
         if adapter is None:
-            return {
-                "response": "All CLI backends exhausted or unavailable",
-                "model_used": model,
-                "tokens": 0,
-                "provider": "none",
-                "error": True,
-            }
+            return await self.route_http_fallback(task)
 
         argv, env = self.build_adapter_command(adapter, task)
         cli_path = argv[0]
@@ -612,6 +606,95 @@ class TaskRouter:
         if session_id:
             out["session_id"] = session_id
         return out
+
+    # ------------------------------------------------------------------
+    # HTTP fallback — last-resort free model
+    # ------------------------------------------------------------------
+
+    async def route_http_fallback(self, task: str) -> dict:
+        """Last-resort HTTP call to a configured free model.
+
+        Used by ``route_code`` when every CLI adapter is exhausted or
+        unavailable. Reads ``M3_FALLBACK_URL``, ``M3_FALLBACK_MODEL``, and
+        ``M3_FALLBACK_KEY`` from env, with sensible defaults pointing at
+        TokenRouter + MiniMax M3 (the same free tier m3_swarm uses).
+
+        Returns the standard ``{response, model_used, tokens, provider,
+        error?}`` shape. On any failure, returns an in-band error
+        (``error: True``) — never raises.
+        """
+        import urllib.error
+        import urllib.request
+        import ssl as _ssl
+
+        url = os.environ.get("M3_FALLBACK_URL", _HTTP_FALLBACK_URL_DEFAULT)
+        model = os.environ.get("M3_FALLBACK_MODEL", _HTTP_FALLBACK_MODEL_DEFAULT)
+        provider = f"http_fallback:{model}"
+
+        api_key = _resolve_fallback_api_key()
+        if not api_key:
+            return {
+                "response": (
+                    "All CLI backends exhausted and M3_FALLBACK_KEY / "
+                    "TOKENROUTER_API_KEY is not set; cannot fall back to HTTP"
+                ),
+                "model_used": model,
+                "tokens": 0,
+                "provider": "none",
+                "error": True,
+            }
+
+        messages = [
+            {"role": "system", "content": _HTTP_FALLBACK_SYSTEM},
+            {"role": "user", "content": task},
+        ]
+        body = json.dumps(
+            {"model": model, "messages": messages, "max_tokens": 4096, "temperature": 0.3}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        # Match m3_swarm: local TLS-inspecting cert chain breaks Python's
+        # default verification. tokenrouter is a trusted first-party endpoint.
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+
+        try:
+            with await asyncio.to_thread(urllib.request.urlopen, req, timeout=60, context=ctx) as r:
+                data = json.loads(r.read())
+            response_text = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {}) or {}
+            total_tokens = int(usage.get("total_tokens", 0) or _estimate_tokens(response_text))
+            return {
+                "response": response_text,
+                "model_used": model,
+                "tokens": total_tokens,
+                "provider": provider,
+            }
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+            logger.warning("HTTP fallback to %s failed: %s", url, exc)
+            return {
+                "response": f"HTTP fallback failed: {exc}",
+                "model_used": model,
+                "tokens": 0,
+                "provider": provider,
+                "error": True,
+            }
+        except Exception as exc:  # never raise from dispatch
+            logger.exception("HTTP fallback unexpected error")
+            return {
+                "response": f"HTTP fallback unexpected error: {exc}",
+                "model_used": model,
+                "tokens": 0,
+                "provider": provider,
+                "error": True,
+            }
 
     async def route_code_resume(
         self,
@@ -898,6 +981,49 @@ class TaskRouter:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# HTTP fallback — last-resort free-model dispatch (default MiniMax M3)
+# ---------------------------------------------------------------------------
+# These constants and the key resolver live at module scope so both
+# the original TaskRouter class (defined above) and any future caller
+# can use the same defaults. route_http_fallback is implemented as a
+# method on TaskRouter (inserted between route_code and route_code_resume
+# in the class body above).
+
+_HTTP_FALLBACK_URL_DEFAULT = "https://api.tokenrouter.com/v1/chat/completions"
+_HTTP_FALLBACK_MODEL_DEFAULT = "MiniMax-M3"
+_HTTP_FALLBACK_SYSTEM = (
+    "You are a senior Python engineer. Output code only, no prose. "
+    "Reply with the complete function or the smallest change that solves the problem."
+)
+
+
+def _resolve_fallback_api_key() -> Optional[str]:
+    """Resolve the HTTP-fallback API key. Order: env, opencode config.
+
+    Same lazy lookup as ``m3_swarm.api_key`` so the two systems can share
+    credentials without duplicating config.
+    """
+    k = os.environ.get("M3_FALLBACK_KEY") or os.environ.get("TOKENROUTER_API_KEY")
+    if k:
+        return k
+    try:
+        cfg_path = Path(os.path.expanduser("~/.config/opencode/opencode.json"))
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text())
+            k = (
+                cfg.get("provider", {})
+                .get("tokenrouter", {})
+                .get("options", {})
+                .get("apiKey")
+            )
+            if k:
+                return k
+    except Exception:
+        pass
+    return None
 
 
 def _estimate_tokens(text: str) -> int:

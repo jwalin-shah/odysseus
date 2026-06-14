@@ -34,6 +34,27 @@ def test_m3_is_never_in_the_code_waterfall():
         assert odysseus.REGISTRY[tool]["kind"] == "coder"
 
 
+def test_cursor_agent_is_noninteractive_for_trusted_worktree():
+    assert "--trust" in odysseus.REGISTRY["cursor-agent"]["argv"]
+
+
+def test_codex_uses_configured_provider():
+    argv = odysseus.REGISTRY["codex"]["argv"]
+    assert not any("model_provider=pioneer" in arg for arg in argv)
+
+
+def test_claude_routes_match_account_contract():
+    assert odysseus.REGISTRY["ca"]["argv"][0] == "ca"
+    assert odysseus.REGISTRY["cb"]["argv"][0] == "cb"
+    assert "--opus" in odysseus.REGISTRY["ca"]["argv"]
+    assert "--opus" in odysseus.REGISTRY["cb"]["argv"]
+    assert odysseus.REGISTRY["claude"]["argv"][:2] == [
+        "/Users/jwalinshah/bin/claude-route",
+        "--account-pioneer",
+    ]
+    assert odysseus.CODE_WATERFALL[:3] == ["ca", "cb", "claude"]
+
+
 def test_pick_skips_missing_clis(monkeypatch):
     monkeypatch.setattr(odysseus, "cli_exists", lambda t: t == "codex")
     monkeypatch.setattr(odysseus, "quota_ok", lambda t: True)
@@ -42,8 +63,8 @@ def test_pick_skips_missing_clis(monkeypatch):
 
 def test_pick_skips_exhausted_quota(monkeypatch):
     monkeypatch.setattr(odysseus, "cli_exists", lambda t: True)
-    monkeypatch.setattr(odysseus, "quota_ok", lambda t: t != "claude")
-    assert odysseus.pick(odysseus.CODE_WATERFALL) == "opencode-opus"
+    monkeypatch.setattr(odysseus, "quota_ok", lambda t: t != "ca")
+    assert odysseus.pick(odysseus.CODE_WATERFALL) == "cb"
 
 
 def test_pick_returns_none_when_nothing_viable(monkeypatch):

@@ -325,10 +325,10 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
         response.raise_for_status()
     except httpx.RequestError as e:
         error_logger.error(f"NetworkError during Brave search: {e}")
-        return []
+        raise  # let core.py record this as a real error, not empty results
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        raise  # let core.py record rate-limit as a real error
 
     try:
         data = response.json()
@@ -494,10 +494,10 @@ def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = 
         response.raise_for_status()
     except httpx.RequestError as e:
         error_logger.error(f"Google PSE search failed: {e}")
-        return []
+        raise
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        raise
 
     try:
         data = response.json()
@@ -551,10 +551,10 @@ def tavily_search(query: str, count: int = 10, time_filter: Optional[str] = None
         response.raise_for_status()
     except httpx.RequestError as e:
         error_logger.error(f"Tavily search failed: {e}")
-        return []
+        raise
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        raise
 
     try:
         data = response.json()
@@ -611,10 +611,10 @@ def serper_search(query: str, count: int = 10, time_filter: Optional[str] = None
         response.raise_for_status()
     except httpx.RequestError as e:
         error_logger.error(f"Serper search failed: {e}")
-        return []
+        raise
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        raise
 
     try:
         data = response.json()

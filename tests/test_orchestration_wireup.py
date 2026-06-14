@@ -119,11 +119,11 @@ class TestRouteDispatchSurvivor:
 class TestAppPySource:
     """app.py can't be imported in tests (boots the world) — assert on source."""
 
-    def test_app_mounts_orchestration_before_dispatch(self):
+    def test_app_mounts_status_before_orchestration_wildcard(self):
         src = (REPO / "app.py").read_text()
         orch = src.index("setup_orchestration_routes()")
         disp = src.index("setup_route_dispatch()")
-        assert orch < disp, "orchestration router must mount before route_dispatch"
+        assert disp < orch, "route status must mount before orchestration wildcard"
 
     def test_app_mounts_orchestration_exactly_once(self):
         src = (REPO / "app.py").read_text()

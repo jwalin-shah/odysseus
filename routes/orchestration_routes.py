@@ -27,6 +27,8 @@
 
 import asyncio
 import logging
+import os
+import sys
 import time
 from typing import Any, Dict, Literal, Optional
 
@@ -37,6 +39,85 @@ from core import orchestration_trace as otrace
 from core import code_run_store as run_store
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Unified ledger integration
+# ---------------------------------------------------------------------------
+# The otrace stream (orchestration_trace.record_trace) is the existing
+# per-request SQLite trace. The unified ledger at
+# ~/projects/odysseus/.ledger/ is the new append-only JSONL stream that
+# consolidates otrace + m3lab + agent-rules. Every dispatch recorded to
+# otrace is also written to the unified ledger via _record_dispatch.
+#
+# Both writes are best-effort: a failure in one must not break the other
+# or the dispatch itself. The unified ledger import is wrapped in
+# try/except so a missing ledger (e.g. in tests) does not break the route.
+
+_LEDGER_DIR = os.path.expanduser("~/projects/odysseus/.ledger")
+if _LEDGER_DIR not in sys.path and os.path.isdir(_LEDGER_DIR):
+    sys.path.insert(0, _LEDGER_DIR)
+
+_LEDGER_OK = False
+_ledger_append = None  # type: ignore[assignment]
+try:
+    from odyssey_ledger import append_event as _ledger_append  # noqa: F401
+    _LEDGER_OK = True
+except Exception as _ledger_exc:
+    logger.debug("unified ledger import failed (non-critical): %s", _ledger_exc)
+
+
+def _record_dispatch(
+    *,
+    task: str,
+    classification: str,
+    model_used: str,
+    tokens: int,
+    latency_ms: float,
+    success: bool,
+    error: Optional[str],
+    source: str,
+    actor: str = "router",
+) -> None:
+    """Record a dispatch to both otrace and the unified ledger.
+
+    Both writes are best-effort. otrace is the existing per-request
+    SQLite trace; the unified ledger is the new append-only JSONL
+    stream at ~/projects/odyssey/.ledger/ that consolidates otrace +
+    m3lab + agent-rules. The two are kept in sync so the architecture
+    doc's "one unified ledger" goal holds without dropping the
+    existing otrace observability surface.
+    """
+    try:
+        otrace.record_trace(
+            task=task,
+            classification=classification,
+            model_used=model_used,
+            tokens=tokens,
+            latency_ms=latency_ms,
+            success=success,
+            error=error,
+            source=source,
+        )
+    except Exception as exc:
+        logger.debug("otrace.record_trace failed (non-critical): %s", exc)
+    if _LEDGER_OK and _ledger_append is not None:
+        try:
+            _ledger_append(
+                source_system="odysseus",
+                subject=otrace.task_hash(task) if task else f"run-{source}",
+                subject_kind="route",
+                actor=actor,
+                task_type=classification,
+                outcome="success" if success else "failure",
+                duration_s=latency_ms / 1000.0,
+                tokens_in=int(tokens or 0),
+                error=error,
+                forensic={"model_used": model_used, "source": source},
+                source_file="orchestration_routes.py",
+            )
+        except Exception as exc:
+            logger.debug("unified ledger append failed (non-critical): %s", exc)
 
 
 class RouteRequest(BaseModel):
@@ -115,7 +196,7 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
                     adapter_name=result.get("provider"),
                 )
                 # Completion trace — records final cost/latency for the stats layer.
-                otrace.record_trace(
+                _record_dispatch(
                     task=task,
                     classification="code",
                     model_used=str(result.get("model_used", "unknown")),
@@ -135,13 +216,14 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
 
             # Submission trace — records that the task was accepted.
             submit_latency_ms = (time.time() - started) * 1000
-            otrace.record_trace(
+            _record_dispatch(
                 task=req.task,
                 classification="code",
                 model_used="pending",
                 tokens=0,
                 latency_ms=submit_latency_ms,
                 success=True,
+                error=None,
                 source="router_async_submission",
             )
 
@@ -178,7 +260,7 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
             }
 
         latency_ms = (time.time() - started) * 1000
-        otrace.record_trace(
+        _record_dispatch(
             task=req.task,
             classification=str(result.get("classification", classified)),
             model_used=str(result.get("model_used", "unknown")),
@@ -187,6 +269,7 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
             success=not result.get("error"),
             error=result.get("error_detail")
             or (str(result.get("response", ""))[:500] if result.get("error") else None),
+            source="router_sync",
         )
         return result
 
@@ -318,7 +401,7 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
                 session_id=result.get("session_id"),
                 adapter_name=result.get("provider"),
             )
-            otrace.record_trace(
+            _record_dispatch(
                 task=message,
                 classification="code",
                 model_used=str(result.get("model_used", "unknown")),
@@ -339,13 +422,14 @@ def setup_orchestration_routes(task_router: Optional[Any] = None) -> APIRouter:
         )
 
         submit_latency_ms = (time.time() - started) * 1000
-        otrace.record_trace(
+        _record_dispatch(
             task=req.message,
             classification="code",
             model_used="pending",
             tokens=0,
             latency_ms=submit_latency_ms,
             success=True,
+            error=None,
             source="router_followup_submission",
         )
 

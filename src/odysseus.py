@@ -45,30 +45,28 @@ DOCS_TOTAL_CAP = 30000       # whole preamble
 REGISTRY = {
     # bypass is safe here: coder runs only inside a disposable worktree with a
     # pytest gate; red = discarded
-    "claude":        {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
+    "claude":        {"argv": ["/Users/jwalinshah/bin/claude-route",
+                               "--account-pioneer", "-p",
+                               "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
     "opencode-opus": {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder"},
-    # Short aliases: ca = claude opus (best), cb = claude sonnet (mid), cc = haiku (fast).
-    # All three go through OpenCode+Pioneer so they share one API key and quota bucket.
-    "ca":            {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder", "alias_of": "opencode-opus"},
-    "cb":            {"argv": ["opencode", "run", "-m", "pioneer/claude-sonnet-4-6", "{prompt}"], "kind": "coder"},
+    # Claude subscription accounts A/B use their isolated OAuth profiles.
+    "ca":            {"argv": ["ca", "--opus", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
+    "cb":            {"argv": ["cb", "--opus", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
     "cc":            {"argv": ["opencode", "run", "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
-    # codex refuses to run outside a trusted git repo; --skip-git-repo-check
-    # lets it run anywhere. We route through Pioneer (matching ca/cb/cc)
-    # so the ChatGPT plan model restrictions don't bite us.
+    # Codex reads its provider/model from ~/.codex/config.toml.
     "codex":         {"argv": ["codex", "exec", "--skip-git-repo-check",
-                               "-c", "model_provider=pioneer",
-                               "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
+                               "{prompt}"], "kind": "coder"},
     "opencode-m3":   {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst"},
     "m3":            {"argv": ["opencode", "run", "-m", "tokenrouter/MiniMax-M3", "{prompt}"], "kind": "analyst", "alias_of": "opencode-m3"},
     # gemini refuses to run outside a trusted directory; --skip-trust
     # lets it run anywhere. Note: --skip-trust must come BEFORE -p, otherwise
     # gemini treats the next arg as the -p value, not a flag.
     "gemini":        {"argv": ["gemini", "--skip-trust", "-p", "{prompt}"], "kind": "analyst"},
-    "cursor-agent":  {"argv": ["cursor-agent", "-p", "{prompt}"], "kind": "coder"},
+    "cursor-agent":  {"argv": ["cursor-agent", "--trust", "-p", "{prompt}"], "kind": "coder"},
     "agy":           {"argv": ["agy", "-p", "{prompt}"], "kind": "analyst"},
 }
 
-CODE_WATERFALL = ["claude", "ca", "cb", "codex"]
+CODE_WATERFALL = ["ca", "cb", "claude", "codex"]
 ANALYZE_WATERFALL = ["opencode-m3", "gemini"]
 
 CODE_WORDS = ("fix", "implement", "refactor", "rewrite", "add ", "patch",
@@ -183,6 +181,23 @@ def load_docs():
 
 
 def pick(waterfall):
+    try:
+        if "ca" in waterfall or "cb" in waterfall:
+            from v2.src.sys_router import pick_premium_tier
+            try:
+                with open("/Users/jwalinshah/projects/platform/systems/quota-core/data/quota-live.json") as f:
+                    import json
+                    providers = json.load(f).get("providers", {})
+                best = pick_premium_tier(providers)
+                if best == "claude-a" and "ca" in waterfall and cli_exists("ca") and quota_ok("ca"):
+                    return "ca"
+                if best == "claude-b" and "cb" in waterfall and cli_exists("cb") and quota_ok("cb"):
+                    return "cb"
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
     for tool in waterfall:
         if cli_exists(tool) and quota_ok(tool):
             return tool
@@ -476,6 +491,15 @@ def do_code(mission, args, docs):
 
     subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch, wt, "HEAD"],
                    check=True, capture_output=True)
+    # Deterministically seed the red test so the gate exists regardless of whether
+    # the agent recreates it — fixes "file or directory not found" on the test path.
+    if args.seed_test_path and args.seed_test_src and os.path.exists(args.seed_test_src):
+        dst = os.path.join(wt, args.seed_test_path)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(args.seed_test_src) as _sf:
+            content = _sf.read()
+        with open(dst, "w") as _df:
+            _df.write(content)
     try:
         repomap = ""
         ody_map = os.path.join(ODY_HOME, "v2", ".venv", "bin", "ody-map")
@@ -487,13 +511,25 @@ def do_code(mission, args, docs):
                     repomap = f"\n\n--- repo map ---\n{mp.stdout[:8000]}"
             except Exception:
                 pass
-        prompt = (f"{docs}{repomap}\n\nMISSION (you are in an isolated git worktree; "
-                  f"edit files directly; the gate is: `{args.test}`):\n{mission}"
-                  if docs or repomap else mission)
-        rc, out, err, dur = run_tool(tool, prompt, wt, args.timeout)
-        test = subprocess.run(args.test, shell=True, cwd=wt, env=_worktree_test_env(repo),
-                              capture_output=True, text=True, timeout=600)
-        passed = test.returncode == 0
+        base_prompt = (f"{docs}{repomap}\n\nMISSION (you are in an isolated git worktree; "
+                       f"edit files directly; the gate is: `{args.test}`):\n{mission}"
+                       if docs or repomap else mission)
+        # Loop until the gate passes or the cap hits — the agent cannot stop on a
+        # failing test; each red run feeds its failure back as the next prompt.
+        gate_attempts = 4
+        prompt = base_prompt
+        passed = False
+        for ga in range(1, gate_attempts + 1):
+            rc, out, err, dur = run_tool(tool, prompt, wt, args.timeout)
+            test = subprocess.run(args.test, shell=True, cwd=wt, env=_worktree_test_env(repo),
+                                  capture_output=True, text=True, timeout=600)
+            passed = test.returncode == 0
+            if passed:
+                break
+            print(f"[ody] code-lane gate red, attempt {ga}/{gate_attempts}; retrying with feedback",
+                  file=sys.stderr)
+            prompt = (f"{base_prompt}\n\nThe gate `{args.test}` STILL FAILS — fix the "
+                      f"implementation so every test passes:\n{(test.stdout + test.stderr)[-1500:]}")
         if passed:
             subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
             subprocess.run(["git", "-C", wt, "commit", "-m", f"ody({tool}): {mission[:60]}"],
@@ -525,9 +561,110 @@ def write_feedback(record):
     if dispatch_id:
         record = dict(record)
         record["dispatch_id"] = dispatch_id
+    # Redact secrets before writing any feedback to disk.
+    try:
+        from ody_evidence import redact_secrets
+        line = redact_secrets(json.dumps(record))
+    except ImportError:
+        line = json.dumps(record)
     with open(path, "w") as f:
-        f.write(json.dumps(record) + "\n")
+        f.write(line + "\n")
     return path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Operator subcommands  (ody status | ody quota | ody backends | ody missions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _do_status():
+    """Show live quota status and recent mission ledger entries."""
+    try:
+        from ody_quota import load_snapshot
+        snap = load_snapshot()
+        fresh = snap.is_fresh()
+        providers = snap.data.get("providers", {})
+        print(f"Quota snapshot: {'FRESH' if fresh else 'STALE'}")
+        for pid, info in providers.items():
+            session = info.get("windows", {}).get("session", {})
+            pct = session.get("percent", "?")
+            status = info.get("status", "?")
+            print(f"  {pid}: session={pct}% status={status}")
+    except FileNotFoundError as e:
+        print(f"quota: {e}")
+    except ImportError:
+        print("quota: ody_quota module not available")
+
+    # Recent missions from feedback ledger.
+    feedback_dir = os.environ.get("ODY_FEEDBACK_DIR", FEEDBACK_DIR)
+    if os.path.isdir(feedback_dir):
+        files = sorted(
+            (f for f in pathlib.Path(feedback_dir).glob("*.jsonl")),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        print(f"\nRecent missions ({min(10, len(files))} of {len(files)}):")
+        for f in files[:10]:
+            try:
+                row = json.loads(f.read_text().strip().splitlines()[-1])
+                tp = "PASS" if row.get("test_passed") else (
+                    "FAIL" if row.get("test_passed") is False else "n/a")
+                print(f"  [{tp:4s}] {row.get('agent_used','?'):14s} "
+                      f"lane={row.get('lane','?'):8s} {str(row.get('prompt',''))[:50]!r}")
+            except Exception:
+                pass
+
+
+def _do_quota():
+    """Print the current quota snapshot as JSON."""
+    try:
+        from ody_quota import load_snapshot
+        snap = load_snapshot()
+        print(json.dumps(snap.data, indent=2))
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except ImportError:
+        print("error: ody_quota module not available", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _do_backends():
+    """List all registered backends from the operator registry."""
+    try:
+        from ody_backends import BACKENDS
+        print(f"{'id':16s} {'command':14s} {'analysis_only':13s} {'scarce':6s} tags")
+        print("-" * 72)
+        for b in BACKENDS.values():
+            print(f"{b.id:16s} {b.command:14s} {str(b.analysis_only):13s} "
+                  f"{str(b.scarce):6s} {', '.join(b.tags)}")
+    except ImportError:
+        # Fallback: print REGISTRY from this file.
+        print("(ody_backends not available; showing raw REGISTRY)")
+        for name, spec in REGISTRY.items():
+            print(f"  {name}: kind={spec['kind']} cmd={spec['argv'][0]}")
+
+
+def _do_missions():
+    """List recent missions from the feedback ledger."""
+    feedback_dir = os.environ.get("ODY_FEEDBACK_DIR", FEEDBACK_DIR)
+    if not os.path.isdir(feedback_dir):
+        print(f"No missions yet (ledger: {feedback_dir})")
+        return
+    files = sorted(
+        (f for f in pathlib.Path(feedback_dir).glob("*.jsonl")),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    print(f"{'test_passed':11s} {'agent':14s} {'lane':8s} {'router':8s} prompt")
+    print("-" * 80)
+    for f in files[:50]:
+        try:
+            row = json.loads(f.read_text().strip().splitlines()[-1])
+            tp = str(row.get("test_passed"))
+            print(f"{tp:11s} {str(row.get('agent_used','?')):14s} "
+                  f"{str(row.get('lane','?')):8s} {str(row.get('router','?')):8s} "
+                  f"{str(row.get('prompt',''))[:45]!r}")
+        except Exception:
+            pass
 
 
 def main(argv=None):
@@ -535,6 +672,22 @@ def main(argv=None):
     if argv and argv[0] == "supervise":
         from ody_supervisor import supervise_main
         return supervise_main(argv[1:])
+
+    # Operator subcommands (ody status | ody quota | ody backends | ody missions).
+    if argv and argv[0] in ("status", "quota", "backends", "missions"):
+        subcmd = argv[0]
+        if subcmd == "status":
+            _do_status()
+            return 0
+        elif subcmd == "quota":
+            return _do_quota() or 0
+        elif subcmd == "backends":
+            _do_backends()
+            return 0
+        elif subcmd == "missions":
+            _do_missions()
+            return 0
+
     p = argparse.ArgumentParser(prog="ody", description=__doc__.splitlines()[0])
     p.add_argument("mission", help="what to do, in plain words")
     p.add_argument("--repo", default=os.getcwd(), help="target repo (default: cwd)")
@@ -545,6 +698,8 @@ def main(argv=None):
     p.add_argument("--hybrid", metavar="FILE:FUNC",
                    help="code lane: M3 drafts FUNC's body, AST splice applies it")
     p.add_argument("--timeout", type=int, default=900, help="agent timeout seconds")
+    p.add_argument("--seed-test-path", help="code lane: relative path to write the red test into")
+    p.add_argument("--seed-test-src", help="code lane: file whose contents seed --seed-test-path")
     p.add_argument("--no-docs", action="store_true", help="skip the 8-doc preamble")
     p.add_argument("--dry-run", action="store_true", help="print routing decision only")
     args = p.parse_args(argv)
@@ -559,6 +714,47 @@ def main(argv=None):
         print(f"[dry-run] lane={lane} tool={tool or 'arxiv'}")
         return 0
 
+    # ── Pre-flight gate (F3): block duplicates, halt loops, exhausted quota ──
+    _task_hash = None  # stamped onto the feedback record if preflight passes
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(ODY_HOME, "v2", "src"))
+        from preflight import check as preflight_check, PreflightBlocked
+        # Build a minimal ledger from existing feedback records.
+        _ledger = []
+        _fb_dir = pathlib.Path(FEEDBACK_DIR)
+        if _fb_dir.is_dir():
+            for _f in _fb_dir.glob("*.jsonl"):
+                try:
+                    for _line in _f.read_text().splitlines():
+                        if _line.strip():
+                            _ledger.append(json.loads(_line))
+                except Exception:
+                    pass
+        # Load live quota snapshot for gate 1.
+        _quota_state = None
+        try:
+            from ody_quota import load_snapshot
+            _snap = load_snapshot()
+            _quota_state = _snap.data if _snap else None
+        except Exception:
+            pass
+        _backend_id = args.tool or (
+            pick(CODE_WATERFALL) if lane == "code" else pick(ANALYZE_WATERFALL)
+        ) or "unknown"
+        _pf_result = preflight_check(
+            prompt=args.mission,
+            backend_id=_backend_id,
+            ledger=_ledger,
+            quota_state=_quota_state,
+        )
+        _task_hash = _pf_result.task_hash
+    except PreflightBlocked as _pf:
+        print(f"[ody] preflight blocked ({_pf.gate}): {_pf.reason}", file=sys.stderr)
+        return 2
+    except ImportError:
+        pass  # preflight module not available — skip gate, don't block
+
     t0 = time.time()
     if lane == "research":
         rec = do_research(args.mission, args)
@@ -571,6 +767,8 @@ def main(argv=None):
     rec.update({"ts": time.time(), "prompt": args.mission, "lane": lane,
                 "router": router, "quota_remaining": remaining, "cost": None,
                 "duration": rec.get("duration", round(time.time() - t0, 1))})
+    if _task_hash:
+        rec["task_hash"] = _task_hash
     try:  # M3 grades the attempt (free, advisory — the gate already judged)
         import m3
         rec["post_mortem"] = m3.complete(

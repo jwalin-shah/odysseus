@@ -1118,7 +1118,11 @@ FUNCTION_TOOL_SCHEMAS = [
                     "test": {"type": "string", "description": "Test command for code lane (default: pytest -q)"},
                     "lane": {"type": "string", "enum": ["code", "analyze", "research"], "description": "Mission lane"},
                     "hybrid": {"type": "string", "description": "Hybrid file:func spec"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 900)"}
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 900)"},
+                    "brief": {
+                        "type": "object",
+                        "description": "Optional full M3 mission brief. When present, affected_files, proposed_fix, proposed_test, mission_prompt, and confidence are validated before dispatch."
+                    }
                 },
                 "required": ["mission"]
             }

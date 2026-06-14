@@ -11,6 +11,27 @@ MOCK_MODELS = {
 }
 
 
+from typing import Optional
+
+def pick_premium_tier(providers: dict) -> Optional[str]:
+    """Returns the best premium tier (claude-a, claude-b, pioneer) or None if all are exhausted."""
+    # Priority 1: Claude-A (Premium)
+    ca = providers.get("ca", {}).get("quotas", {})
+    if ca.get("weekly_pct_remaining", 0) > 10 and ca.get("session_pct_remaining", 100) > 10:
+        return "claude-a"
+
+    # Priority 2: Claude-B (Premium)
+    cb = providers.get("cb", {}).get("quotas", {})
+    if cb.get("weekly_pct_remaining", 0) > 10 and cb.get("session_pct_remaining", 100) > 10:
+        return "claude-b"
+
+    # Priority 3: Pioneer (Pro Legacy)
+    pioneer = providers.get("pioneer", {})
+    if pioneer.get("status") == "VERIFIED" and pioneer.get("used_pct", 100) < 90:
+        return "pioneer"
+
+    return None
+
 def get_best_model():
     """
     Waterfall Routing Algorithm:
@@ -35,21 +56,9 @@ def get_best_model():
         return "codex"
 
     providers = data.get("providers", {})
-
-    # Priority 1: Claude-A (Premium)
-    ca = providers.get("ca", {}).get("quotas", {})
-    if ca.get("weekly_pct_remaining", 0) > 10 and ca.get("session_pct_remaining", 100) > 10:
-        return "claude-a"
-
-    # Priority 2: Claude-B (Premium)
-    cb = providers.get("cb", {}).get("quotas", {})
-    if cb.get("weekly_pct_remaining", 0) > 10 and cb.get("session_pct_remaining", 100) > 10:
-        return "claude-b"
-
-    # Priority 3: Pioneer (Pro Legacy)
-    pioneer = providers.get("pioneer", {})
-    if pioneer.get("status") == "VERIFIED" and pioneer.get("used_pct", 100) < 90:
-        return "pioneer"
+    premium = pick_premium_tier(providers)
+    if premium:
+        return premium
 
     # Fallback: Free Compute
     return "codex"

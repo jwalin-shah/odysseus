@@ -1,6 +1,12 @@
 # tests/test_route_api.py
 """Integration tests for POST /api/route and GET /api/route/status.
 
+POST /api/route is owned by routes/orchestration_routes.py (traced, async
+by default with `sync=False`, in-band errors — never a 500). GET
+/api/route/status lives in routes/route_dispatch.py. The main app mounts
+both in that order. These tests mount the same pair so we exercise the
+real request pipeline.
+
 Uses FastAPI TestClient with stubbed auth (mimicking the pattern used in
 other odysseus tests: patch src.auth_helpers.get_current_user to return a
 fixed user string) and a patched subprocess.run to avoid real CLI calls.
@@ -13,6 +19,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from routes.orchestration_routes import setup_orchestration_routes
 from routes.route_dispatch import setup_route_dispatch
 import src.auth_helpers as auth_helpers
 
@@ -23,10 +30,19 @@ import src.auth_helpers as auth_helpers
 
 
 def _build_app(auth_user: str = "test-user"):
-    """Build a minimal FastAPI app with route_dispatch and stubbed auth."""
+    """Build a minimal FastAPI app with BOTH routers in app.py's order.
+
+    The main app mounts route_dispatch first so concrete GET /status is not
+    shadowed by orchestration's wildcard GET /{run_id}. POST /api/route has
+    only one owner.
+    """
     app = FastAPI()
-    router = setup_route_dispatch()
-    app.include_router(router)
+    # Build a real TaskRouter — the factory wires it through the
+    # orchestration router. Tests patch subprocess.run / shutil.which /
+    # Path.read_text to control what the router sees.
+    from core.router import TaskRouter
+    app.include_router(setup_route_dispatch())
+    app.include_router(setup_orchestration_routes(task_router=TaskRouter()))
     return app
 
 
@@ -77,7 +93,7 @@ class TestRouteEndpoint:
                 with patch.object(Path, "read_text", return_value=json.dumps(quota)):
                     resp = client.post(
                         "/api/route",
-                        json={"task": "write a hello world function", "type": "code"},
+                        json={"task": "write a hello world function", "type": "code", "sync": True},
                     )
 
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
@@ -113,7 +129,7 @@ class TestRouteEndpoint:
                 with patch.object(Path, "read_text", return_value=json.dumps(quota)):
                     resp = client.post(
                         "/api/route",
-                        json={"task": "write some code", "type": "code"},
+                        json={"task": "write some code", "type": "code", "sync": True},
                     )
 
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"

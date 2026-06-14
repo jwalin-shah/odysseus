@@ -726,13 +726,13 @@ from routes.brain_routes import setup_brain_routes
 app.include_router(setup_brain_routes())
 
 # Intelligent task routing (quota-aware code/research/chat dispatch).
-# Order matters: orchestration_routes owns POST /api/route (traced, in-band
-# errors); route_dispatch keeps only GET /api/route/status. Starlette matches
-# in registration order, so the traced dispatcher must mount first.
-from routes.orchestration_routes import setup_orchestration_routes
-app.include_router(setup_orchestration_routes())
+# Order matters for GET routes: register the concrete /api/route/status before
+# orchestration_routes' wildcard /api/route/{run_id}. POST /api/route has only
+# one owner, so mounting route_dispatch first does not create a POST collision.
 from routes.route_dispatch import setup_route_dispatch
 app.include_router(setup_route_dispatch())
+from routes.orchestration_routes import setup_orchestration_routes
+app.include_router(setup_orchestration_routes())
 
 # Contacts (CardDAV)
 from routes.contacts_routes import setup_contacts_routes

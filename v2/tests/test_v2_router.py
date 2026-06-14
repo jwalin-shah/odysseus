@@ -98,3 +98,33 @@ def test_router_respects_explicit_model(tmp_path, monkeypatch):
     
     assert result.returncode == 0
     assert "Mock MiniMax Response" in result.stdout
+
+from v2.src.sys_router import pick_premium_tier
+
+def test_pick_premium_tier_ca():
+    providers = {
+        "ca": {
+            "quotas": {
+                "session_pct_remaining": 50,
+                "weekly_pct_remaining": 50
+            }
+        }
+    }
+    assert pick_premium_tier(providers) == "claude-a"
+
+def test_pick_premium_tier_falls_through_to_codex():
+    providers = {
+        "ca": {
+            "quotas": {
+                "session_pct_remaining": 5,
+                "weekly_pct_remaining": 50
+            }
+        },
+        "cb": {
+            "quotas": {
+                "session_pct_remaining": 5,
+                "weekly_pct_remaining": 50
+            }
+        }
+    }
+    assert pick_premium_tier(providers) is None
