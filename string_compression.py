@@ -1,4 +1,5 @@
 def compress(s: str) -> str:
+    """Compress a string using run-length encoding; return original if longer."""
     if not s:
         return s
     result = []
