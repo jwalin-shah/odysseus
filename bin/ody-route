@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""ody-route \u2014 agent-side shim that sends a brain-dump to Odysseus /api/route.
+
+Every external agent (Codex, Claude Code, AGY, Cursor, etc.) that wants to
+send work through the unified orchestrator calls this shim instead of
+hitting the dispatcher directly. The shim:
+
+  1. Validates input (task string, --type, --sync).
+  2. Resolves auth (bearer token from env, or LOCALHOST_BYPASS).
+  3. POSTs to http://127.0.0.1:$ODY_PORT/api/route.
+  4. Prints the result in either human-readable or JSON form.
+  5. Exits 0 on success, 2 on in-band dispatch error, 1 on transport
+     failure.
+
+The dispatcher records every accepted task to the unified ledger
+(slice 3), so the shim does NOT also write to the ledger \u2014 doing so
+would double-count.
+
+Usage:
+  ody-route "implement a hello world function" --type code
+  ody-route "what is happening" --type chat
+  ody-route --task-file /tmp/brain-dump.txt --type research --sync
+  echo "explain this error" | ody-route --task-file -
+
+Auth (in priority order):
+  1. --token <bearer>        \u2014 explicit token, overrides env
+  2. $ODY_API_TOKEN          \u2014 bearer token from env
+  3. $LOCALHOST_BYPASS=true  \u2014 no auth (loopback only, server-side gate)
+
+Port resolution:
+  1. --port <N>              \u2014 explicit
+  2. $ODYSSEUS_PORT / $APP_PORT  \u2014 env override
+  3. 7860                    \u2014 default (matches the live Odysseus server)
+"""
+
+import argparse
+import json
+import os
+import pathlib
+import sys
+import urllib.error
+import urllib.request
+
+
+def _resolve_port(args_port: int | None) -> int:
+    if args_port is not None:
+        return int(args_port)
+    return int(
+        os.environ.get("ODYSSEUS_PORT")
+        or os.environ.get("APP_PORT")
+        or "7860"
+    )
+
+
+def _resolve_token(args_token: str | None) -> str | None:
+    if args_token:
+        return args_token.strip()
+    t = os.environ.get("ODY_API_TOKEN", "").strip()
+    return t or None
+
+
+def _post_route(
+    *,
+    url: str,
+    task: str,
+    task_type: str,
+    sync: bool,
+    token: str | None,
+    timeout: int = 30,
+) -> dict:
+    """POST /api/route. Returns parsed response. Raises on transport errors."""
+    body = json.dumps({"task": task, "type": task_type, "sync": sync}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode(errors="replace")
+        raise RuntimeError(f"Odysseus HTTP {exc.code}: {err_body[:500]}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Odysseus request failed: {exc}")
+
+
+def main(argv: list | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="ody-route",
+        description="Send a brain-dump to Odysseus /api/route",
+    )
+    p.add_argument("task", nargs="?", help="The task string to dispatch")
+    p.add_argument(
+        "--task-file",
+        help="Read the task from this file (use '-' for stdin)",
+    )
+    p.add_argument(
+        "--type",
+        choices=["code", "research", "chat", "auto"],
+        default="auto",
+        help="Task type (default: auto-classify server-side)",
+    )
+    p.add_argument(
+        "--sync",
+        action="store_true",
+        help="Force synchronous dispatch (block for the result, up to 300s)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Odysseus port (default: $ODYSSEUS_PORT or 7860)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token (overrides $ODY_API_TOKEN)",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON instead of human-readable",
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=30,
+        help="HTTP timeout in seconds (default: 30)",
+    )
+    args = p.parse_args(argv)
+
+    # ------------------------------------------------------------------
+    # Resolve task input
+    # ------------------------------------------------------------------
+    if args.task_file:
+        if args.task_file == "-":
+            task = sys.stdin.read()
+        else:
+            tf = pathlib.Path(args.task_file)
+            if not tf.exists():
+                print(f"[ody-route] task file not found: {args.task_file}", file=sys.stderr)
+                return 1
+            task = tf.read_text()
+    elif args.task:
+        task = args.task
+    else:
+        p.error("provide a TASK string or --task-file")
+
+    if not task.strip():
+        print("[ody-route] task is empty", file=sys.stderr)
+        return 1
+
+    # ------------------------------------------------------------------
+    # Resolve transport
+    # ------------------------------------------------------------------
+    port = _resolve_port(args.port)
+    url = f"http://127.0.0.1:{port}/api/route"
+    token = _resolve_token(args.token)
+
+    # ------------------------------------------------------------------
+    # Dispatch
+    # ------------------------------------------------------------------
+    try:
+        result = _post_route(
+            url=url,
+            task=task,
+            task_type=args.type,
+            sync=args.sync,
+            token=token,
+            timeout=args.timeout,
+        )
+    except RuntimeError as exc:
+        print(f"[ody-route] {exc}", file=sys.stderr)
+        return 1
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        classification = result.get("classification", "?")
+        run_id = result.get("run_id")
+        response = result.get("response", "")
+        error = bool(result.get("error"))
+
+        print(f"classification: {classification}")
+        if run_id:
+            print(f"run_id:        {run_id}")
+            print(f"poll:          http://127.0.0.1:{port}/api/route/{run_id}")
+        tokens = result.get("tokens")
+        if tokens is not None:
+            print(f"tokens:        {tokens}")
+        provider = result.get("provider")
+        if provider and provider != "pending":
+            print(f"provider:      {provider}")
+        if response:
+            print()
+            print(response)
+
+    return 2 if result.get("error") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
