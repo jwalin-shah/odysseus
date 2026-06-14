@@ -16,6 +16,25 @@ def bfs(graph: dict, start) -> list:
                 queue.append(neighbor)
     return result
 
+def shortest_path(graph: dict, start, end) -> list:
+    """Find the shortest path from start to end using BFS. Returns the path as a list, or [] if no path exists."""
+    if start not in graph or end not in graph:
+        return []
+    if start == end:
+        return [start]
+    visited = {start}
+    queue = deque([(start, [start])])
+    while queue:
+        node, path = queue.popleft()
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                new_path = path + [neighbor]
+                if neighbor == end:
+                    return new_path
+                visited.add(neighbor)
+                queue.append((neighbor, new_path))
+    return []
+
 def dfs(graph: dict, start) -> list:
     """Depth-first search traversal starting from start node (iterative)."""
     if start not in graph:
