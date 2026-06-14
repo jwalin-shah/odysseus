@@ -6,7 +6,7 @@ def encrypt(text: str, shift: int) -> str:
             result.append(chr((ord(char) - base + shift) % 26 + base))
         else:
             result.append(char)
-    return ''.join(result)
+    return "".join(result)
 
 
 def decrypt(text: str, shift: int) -> str:
