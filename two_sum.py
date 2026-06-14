@@ -21,7 +21,7 @@ def three_sum(arr):
         while left < right:
             s = nums[i] + nums[left] + nums[right]
             if s == 0:
-                result.append((nums[i], nums[left], nums[right]))
+                result.append([nums[i], nums[left], nums[right]])
                 left += 1
                 right -= 1
                 while left < right and nums[left] == nums[left - 1]:
