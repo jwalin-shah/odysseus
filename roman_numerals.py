@@ -25,6 +25,8 @@ _VALUES: List[Tuple[int, str]] = [
     (1, "I"),
 ]
 
+_VALUES_DICT: dict = {symbol: value for value, symbol in _VALUES}
+
 
 def to_roman(num: int) -> str:
     """Convert an integer to its Roman numeral representation.
@@ -87,6 +89,3 @@ def from_roman(s: str) -> int:
         total += _VALUES_DICT[ch]
         i += 1
     return total
-
-
-_VALUES_DICT = {symbol: value for value, symbol in _VALUES}
