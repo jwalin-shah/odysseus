@@ -1,132 +1,25 @@
-def parse_trajectory_step(step: dict) -> tuple[str, int, int]:
-    """Extract (model_id, input_tokens, output_tokens) from a trajectory step.
+"""Deterministic token-cost estimation for recorded model calls."""
 
-    Tolerates common key aliases and a nested 'usage' dict (e.g. as produced
-    by OpenAI-style APIs).
-    """
-    # Model ID aliases
-    model_id = ""
-    for key in ("model_id", "model", "id", "name"):
-        if key in step:
-            model_id = step[key]
-            break
-
-    # Input token aliases at top level
-    input_tokens = None
-    for key in ("input_tokens", "prompt_tokens", "tokens_in", "input"):
-        if key in step:
-            input_tokens = step[key]
-            break
-
-    # Fallback: look inside a nested 'usage' dict
-    if input_tokens is None and isinstance(step.get("usage"), dict):
-        usage = step["usage"]
-        for key in ("prompt_tokens", "input_tokens", "tokens_in"):
-            if key in usage:
-                input_tokens = usage[key]
-                break
-
-    if input_tokens is None:
-        input_tokens = 0
-
-    # Output token aliases at top level
-    output_tokens = None
-    for key in ("output_tokens", "completion_tokens", "tokens_out", "output"):
-        if key in step:
-            output_tokens = step[key]
-            break
-
-    # Fallback: look inside a nested 'usage' dict
-    if output_tokens is None and isinstance(step.get("usage"), dict):
-        usage = step["usage"]
-        for key in ("completion_tokens", "output_tokens", "tokens_out"):
-            if key in usage:
-                output_tokens = usage[key]
-                break
-
-    if output_tokens is None:
-        output_tokens = 0
-
-    return (str(model_id), int(input_tokens), int(output_tokens))
+MODEL_PRICING = {
+    "gpt-4o-mini": {
+        "input_per_token": 0.15 / 1_000_000,
+        "output_per_token": 0.60 / 1_000_000,
+    },
+    "claude-haiku": {
+        "input_per_token": 0.25 / 1_000_000,
+        "output_per_token": 1.25 / 1_000_000,
+    },
+}
 
 
-def _get_step_value(step, key, default=None):
-    """Read `key` from a step that may be a dict or an object (e.g. SimpleNamespace)."""
-    if isinstance(step, dict):
-        return step.get(key, default)
-    return getattr(step, key, default)
+def _entry_cost(entry: dict) -> float:
+    pricing = MODEL_PRICING.get(entry.get("model"))
+    if not pricing:
+        return 0.0
+    input_tokens = max(0, int(entry.get("input_tokens", 0)))
+    output_tokens = max(0, int(entry.get("output_tokens", 0)))
+    return input_tokens * pricing["input_per_token"] + output_tokens * pricing["output_per_token"]
 
 
-def extract_step_usage(step) -> tuple:
-    """Extract (model_name, input_tokens, output_tokens) from a trajectory step.
-
-    Tolerates either attribute-style or dict-style step records, plus common
-    key aliases for input/output token counts and a nested 'usage' dict
-    (e.g. as produced by OpenAI-style APIs).
-    """
-    # Model ID aliases
-    model_id = ""
-    for key in ("model_id", "model", "id", "name"):
-        val = _get_step_value(step, key)
-        if val is not None:
-            model_id = val
-            break
-
-    # Input token aliases at top level
-    input_tokens = None
-    for key in ("input_tokens", "prompt_tokens", "tokens_in", "input"):
-        val = _get_step_value(step, key)
-        if val is not None:
-            input_tokens = val
-            break
-
-    # Fallback: look inside a nested 'usage' dict
-    if input_tokens is None:
-        usage = _get_step_value(step, "usage")
-        if isinstance(usage, dict):
-            for key in ("prompt_tokens", "input_tokens", "tokens_in"):
-                if key in usage and usage[key] is not None:
-                    input_tokens = usage[key]
-                    break
-
-    if input_tokens is None:
-        input_tokens = 0
-
-    # Output token aliases at top level
-    output_tokens = None
-    for key in ("output_tokens", "completion_tokens", "tokens_out", "output"):
-        val = _get_step_value(step, key)
-        if val is not None:
-            output_tokens = val
-            break
-
-    # Fallback: look inside a nested 'usage' dict
-    if output_tokens is None:
-        usage = _get_step_value(step, "usage")
-        if isinstance(usage, dict):
-            for key in ("completion_tokens", "output_tokens", "tokens_out"):
-                if key in usage and usage[key] is not None:
-                    output_tokens = usage[key]
-                    break
-
-    if output_tokens is None:
-        output_tokens = 0
-
-    return (str(model_id), int(input_tokens), int(output_tokens))
-
-
-def build_trajectory_log(steps: list) -> dict:
-    """Construct a trajectory_log dict wrapping a list of step dicts.
-
-    Preserves the order of `steps` as provided. The result has the form
-    ``{"steps": [...]}``.
-    """
-    return {"steps": list(steps)}
-
-
-from types import SimpleNamespace
-assert extract_step_usage(SimpleNamespace(model='gpt-4o', input_tokens=1000, output_tokens=500)) == ('gpt-4o', 1000, 500)
-assert extract_step_usage({'model': 'gpt-4o-mini', 'prompt_tokens': 200, 'completion_tokens': 100}) == ('gpt-4o-mini', 200, 100)
-assert build_trajectory_log([]) == {'steps': []}
-assert build_trajectory_log([{'model': 'gpt-4'}]) == {'steps': [{'model': 'gpt-4'}]}
-log = build_trajectory_log([{'a': 1}, {'b': 2}]); assert log['steps'][0] == {'a': 1} and log['steps'][1] == {'b': 2}
+def estimate_cost(log: list[dict]) -> float:
+    return sum(_entry_cost(entry) for entry in log)
