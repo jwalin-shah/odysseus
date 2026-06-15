@@ -7,10 +7,10 @@ Architecture:
   Odysseus agent
     └── mcp_manager
         └── inbox_server (this file, stdio MCP)
-            └── HTTP → http://localhost:8080/<route>  (the running inbox_server)
+            └── HTTP → http://localhost:9849/<route>  (the running inbox_server)
 
 Setup:
-  1. Inbox server must be running: `uv run python inbox_server.py` (default port 8080)
+  1. Inbox server must be running: `uv run python inbox_server.py` (default port 9849)
   2. Auth token in env: INBOX_SERVER_TOKEN  (we read from Infisical on startup if unset)
   3. Registered in src/builtin_mcp.py::_BUILTIN_SERVERS
 
@@ -55,7 +55,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Config — read inbox URL + token from env or Infisical
-INBOX_URL = os.environ.get("INBOX_URL", "http://127.0.0.1:8080").rstrip("/")
+INBOX_URL = os.environ.get("INBOX_URL", "http://127.0.0.1:9849").rstrip("/")
 INBOX_TOKEN_ENV = "INBOX_SERVER_TOKEN"
 
 
