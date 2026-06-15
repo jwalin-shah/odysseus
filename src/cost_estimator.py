@@ -1,25 +1,50 @@
-# Global pricing table mapping model_id to (input_price_per_1k, output_price_per_1k) in USD
-_PRICING_TABLE = {}
+def parse_trajectory_step(step: dict) -> tuple[str, int, int]:
+    """Extract (model_id, input_tokens, output_tokens) from a trajectory step.
 
-
-def register_model_pricing(model_id: str, input_price_per_1k: float, output_price_per_1k: float) -> None:
-    """Add or overwrite the per-1k-token USD pricing for a model in the global pricing table.
-
-    Args:
-        model_id: The unique identifier of the model.
-        input_price_per_1k: Price in USD per 1,000 input tokens.
-        output_price_per_1k: Price in USD per 1,000 output tokens.
+    Tolerates common key aliases and a nested 'usage' dict (e.g. as produced
+    by OpenAI-style APIs).
     """
-    _PRICING_TABLE[model_id] = (input_price_per_1k, output_price_per_1k)
+    # Model ID aliases
+    model_id = ""
+    for key in ("model_id", "model", "id", "name"):
+        if key in step:
+            model_id = step[key]
+            break
 
+    # Input token aliases at top level
+    input_tokens = None
+    for key in ("input_tokens", "prompt_tokens", "tokens_in", "input"):
+        if key in step:
+            input_tokens = step[key]
+            break
 
-def get_model_pricing(model_id: str):
-    """Retrieve the per-1k-token USD pricing tuple for a model.
+    # Fallback: look inside a nested 'usage' dict
+    if input_tokens is None and isinstance(step.get("usage"), dict):
+        usage = step["usage"]
+        for key in ("prompt_tokens", "input_tokens", "tokens_in"):
+            if key in usage:
+                input_tokens = usage[key]
+                break
 
-    Args:
-        model_id: The unique identifier of the model.
+    if input_tokens is None:
+        input_tokens = 0
 
-    Returns:
-        A tuple of (input_price_per_1k, output_price_per_1k), or None if not found.
-    """
-    return _PRICING_TABLE.get(model_id)
+    # Output token aliases at top level
+    output_tokens = None
+    for key in ("output_tokens", "completion_tokens", "tokens_out", "output"):
+        if key in step:
+            output_tokens = step[key]
+            break
+
+    # Fallback: look inside a nested 'usage' dict
+    if output_tokens is None and isinstance(step.get("usage"), dict):
+        usage = step["usage"]
+        for key in ("completion_tokens", "output_tokens", "tokens_out"):
+            if key in usage:
+                output_tokens = usage[key]
+                break
+
+    if output_tokens is None:
+        output_tokens = 0
+
+    return (str(model_id), int(input_tokens), int(output_tokens))
