@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch
+
 from src.workflow_engine import (
     inbox_summary_flow,
     reply_flow,
@@ -8,59 +9,54 @@ from src.workflow_engine import (
 )
 
 
-# Fake shape that inbox_tool.fetch_all would return.
-SAMPLE_INBOX = {
-    "gmail": [
-        {"id": "1", "unread": True},
-        {"id": "2", "unread": False},
-        {"id": "3", "unread": True},
-    ],
-    "slack": [
-        {"id": "a", "unread": True},
-        {"id": "b", "unread": True},
-    ],
-    "outlook": [],
-}
-
-
 @patch("src.workflow_engine.inbox_tool")
 def test_inbox_summary_flow_returns_platform_unread_counts(mock_inbox):
-    mock_inbox.fetch_all.return_value = SAMPLE_INBOX
+    """inbox_summary_flow returns a dict keyed by platform with unread counts."""
+    mock_inbox.fetch_summary.return_value = {
+        "gmail": 7,
+        "slack": 4,
+        "teams": 2,
+    }
 
     result = inbox_summary_flow()
 
     assert isinstance(result, dict)
-    assert set(result.keys()) == {"gmail", "slack", "outlook"}
-    assert result["gmail"] == 2
-    assert result["slack"] == 2
-    assert result["outlook"] == 0
-    mock_inbox.fetch_all.assert_called_once()
+    assert set(result.keys()) == {"gmail", "slack", "teams"}
+    assert result["gmail"] == 7
+    assert result["slack"] == 4
+    assert result["teams"] == 2
+    mock_inbox.fetch_summary.assert_called_once()
 
 
+@patch("src.workflow_engine.calendar_tool")
+@patch("src.workflow_engine.messaging_tool")
 @patch("src.workflow_engine.inbox_tool")
-def test_reply_flow_raises_before_sending(mock_inbox):
+def test_reply_flow_raises_approval_required_before_sending(
+    mock_inbox, mock_messaging, mock_calendar
+):
+    """reply_flow must raise ApprovalRequired before any send is executed."""
     with pytest.raises(ApprovalRequired):
-        reply_flow(
-            message_id="m1",
-            platform="gmail",
-            body="Sounds good.",
-            approved=False,
-        )
+        reply_flow(message_id="msg_001", body="Sounds good!")
 
-    # Critical: nothing was actually dispatched.
-    mock_inbox.send_reply.assert_not_called()
+    mock_messaging.send.assert_not_called()
+    mock_calendar.create_event.assert_not_called()
     mock_inbox.send.assert_not_called()
 
 
 @patch("src.workflow_engine.calendar_tool")
-def test_calendar_add_flow_raises_before_creating_event(mock_calendar):
+@patch("src.workflow_engine.messaging_tool")
+@patch("src.workflow_engine.inbox_tool")
+def test_calendar_add_flow_raises_approval_required_before_creating(
+    mock_inbox, mock_messaging, mock_calendar
+):
+    """calendar_add_flow must raise ApprovalRequired before any event is created."""
     with pytest.raises(ApprovalRequired):
         calendar_add_flow(
-            title="Team standup",
-            start="2025-01-01T09:00:00",
-            end="2025-01-01T09:15:00",
-            attendees=["a@example.com"],
-            approved=False,
+            title="Team Sync",
+            start="2024-01-15T10:00:00",
+            duration_minutes=30,
         )
 
     mock_calendar.create_event.assert_not_called()
+    mock_messaging.send.assert_not_called()
+    mock_inbox.create_event.assert_not_called()
