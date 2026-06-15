@@ -1,21 +1,27 @@
 import time
 
-
 class CircuitBreaker:
-    def __init__(self, failure_threshold, reset_timeout):
+    def __init__(self, failure_threshold, recovery_timeout):
         self.failure_threshold = failure_threshold
-        self.reset_timeout = reset_timeout
-        self._failure_count = 0
-        self.state = 'closed'
-        self._last_failure_time = None
-
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = 0
+        self._state = 'closed'
+    
     def record_failure(self):
-        self._failure_count += 1
-        self._last_failure_time = time.time()
-        if self._failure_count >= self.failure_threshold:
-            self.state = 'open'
-
-    def reset(self):
-        self._failure_count = 0
-        self.state = 'closed'
-        self._last_failure_time = None
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.failure_threshold:
+            self._state = 'open'
+    
+    def allow_request(self):
+        if self._state == 'open':
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                self._state = 'half_open'
+                return True
+            return False
+        return True
+    
+    @property
+    def state(self) -> str:
+        return self._state
