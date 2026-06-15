@@ -1,5 +1,7 @@
-# Harness Routing
+# Odysseus Request Routing
 
-How Odysseus turns a user message into an executed action.
+How a user message becomes an executed action.
 
-## Flow
+## 1. Intent Classification
+
+`intent_router.classify(text)` parses the user text and returns an `IntentResult`:
