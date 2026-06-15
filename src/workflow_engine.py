@@ -19,19 +19,8 @@ loop to confirm, and either re-executes the step or aborts.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional
-
-from src.inbox_tool import (
-    inbox_get,
-    inbox_post,
-    send_imessage,
-    send_whatsapp,
-    send_email,
-    get_calendar_upcoming,
-    get_gmail_unread,
-    get_imessage_contacts,
-)
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -88,16 +77,13 @@ class Step:
     name: str
     needs_approval: bool
     run: Callable[[], Any]
+    payload: dict = field(default_factory=dict)
 
     def execute(self) -> Any:
         log.info("workflow step start: %s (approval=%s)", self.name, self.needs_approval)
         if self.needs_approval:
             log.info("workflow step requires approval: %s", self.name)
-            raise ApprovalRequired(action=self.name, payload={}, step=self)
+            raise ApprovalRequired(action=self.name, payload=self.payload, step=self)
         result = self.run()
         log.info("workflow step ok:   %s", self.name)
         return result
-
-
-# ---------------------------------------------------------------------------
-# Workflows
