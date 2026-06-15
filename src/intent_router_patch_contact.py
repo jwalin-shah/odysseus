@@ -1,68 +1,63 @@
-import re
-
-# Existing prepositional contact pattern (kept as-is).
-_CONTACT_RE = re.compile(
-    r'\b(?:to|from|with|about)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b'
-)
-
-# Fallback: bare capitalized name not after a preposition.
+# --- New module-level helpers (add near _CONTACT_RE) ---
 _BARE_NAME_RE = re.compile(r'\b([A-Z][a-z]{1,15})\b')
 
-# Tokens that look like proper nouns but are not contacts.
+# Platforms, services, and weekday/month names that look like names
+# but are not contacts.
 _SKIP_WORDS = {
-    # platforms / services
-    'imessage', 'whatsapp', 'gmail', 'email', 'slack', 'discord',
-    'telegram', 'signal', 'messenger', 'facebook', 'twitter',
-    'instagram', 'snapchat', 'teams', 'skype', 'zoom', 'sms',
-    'text', 'message', 'mail', 'inbox', 'draft', 'thread',
-    # generic verbs / nouns that can appear capitalized
-    'send', 'reply', 'forward', 'show', 'find', 'get', 'give',
-    'call', 'ask', 'tell', 'say', 'said', 'tell',
-    # common stop words (defensive — most are filtered by the
-    # explicit tuple below, but this catches the lowercase forms)
-    'the', 'a', 'an', 'i', 'my', 'me', 'we', 'us', 'our', 'you', 'your',
-    'what', 'who', 'when', 'where', 'how', 'why', 'which',
-    'did', 'does', 'do', 'is', 'was', 'were', 'are', 'am',
-    'be', 'been', 'being',
-    'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might',
-    'to', 'from', 'with', 'for', 'in', 'on', 'at', 'by', 'about', 'of',
-    'please', 'thanks', 'thank', 'hi', 'hello', 'hey',
+    # messaging platforms / services
+    'imessage', 'whatsapp', 'gmail', 'slack', 'discord', 'telegram',
+    'signal', 'sms', 'email', 'messenger', 'teams', 'outlook',
+    'facebook', 'instagram', 'twitter', 'snapchat', 'linkedin',
+    'message', 'messages', 'chat', 'chats', 'notification', 'notifications',
+    # days
+    'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+    'saturday',
+    # months
+    'january', 'february', 'march', 'april', 'may', 'june', 'july',
+    'august', 'september', 'october', 'november', 'december',
+    # common app/feature words
+    'Today', 'Tomorrow', 'Yesterday', 'Inbox', 'Drafts', 'Sent',
+    'Trash', 'Spam',
 }
 
-# Words that may be capitalized in input but are never contact names.
-_EXPLICIT_TITLE_SKIP = {
-    'The', 'A', 'An', 'I', 'My', 'Me', 'What', 'Who', 'When', 'Where',
-    'How', 'Why', 'Which', 'Did', 'Does', 'Do', 'Is', 'Was', 'Were',
-    'Are', 'Am', 'Can', 'Could', 'Would', 'Should', 'Will', 'To',
-    'From', 'With', 'For', 'In', 'On', 'At', 'By', 'About',
-    'Send', 'Reply', 'Forward', 'Show', 'Find', 'Get', 'Give', 'Call',
-    'Ask', 'Tell', 'Say', 'Said',
+# Sentence-initial / function words that are capitalized but not names.
+_SKIP_INITIAL = {
+    'The', 'A', 'An', 'I', 'My', 'Your', 'His', 'Her', 'Our', 'Their',
+    'What', 'Who', 'When', 'Where', 'How', 'Why', 'Which',
+    'Did', 'Does', 'Do', 'Is', 'Are', 'Was', 'Were', 'Has', 'Have', 'Had',
+    'Can', 'Could', 'Would', 'Should', 'Will', 'Shall', 'May', 'Might',
+    'Show', 'Get', 'Find', 'Send', 'Open', 'Read', 'Tell', 'Check',
+    'Reply', 'Forward', 'Delete', 'Mark', 'Unread', 'Draft', 'Compose',
+    'New', 'Old', 'Latest', 'Last', 'First', 'Next', 'Previous',
+    'Hey', 'Hi', 'Hello', 'Please', 'Thanks', 'Thank',
 }
 
 
-def _extract_contact(text: str) -> str | None:
-    """Return a contact name from ``text``, or ``None`` if none is found.
+def _extract_contact(text: str) -> Optional[str]:
+    """Return the most likely contact name in *text*, or None.
 
-    Strategy
-    --------
-    1. Prefer a name introduced by a preposition (``to Sarah``,
-       ``from John Smith``, ``with Alex``).
-    2. Otherwise fall back to scanning for any bare capitalized token
-       that is not a platform name, service word, or common English
-       stop word.  This handles queries like
-       ``"what did Sarah say"`` where no preposition precedes the name.
+    Order of attempts:
+      1. A capitalized token immediately following a preposition
+         (``to`` / ``from`` / ``with`` / ``about`` / ``on`` etc.),
+         matched by ``_CONTACT_RE``.
+      2. A bare capitalized word anywhere in the string, excluding
+         platform names, services, and English function/initial words.
     """
-    # 1) Prepositional match wins.
+    # 1. Prepositional match (highest confidence).
     m = _CONTACT_RE.search(text)
     if m:
         return m.group(1)
 
-    # 2) Bare-capitalized-name fallback.
+    # 2. Fallback: any capitalized word that looks like a proper noun.
     for m in _BARE_NAME_RE.finditer(text):
         w = m.group(1)
-        if w in _EXPLICIT_TITLE_SKIP:
+        if w in _SKIP_INITIAL:
             continue
         if w.lower() in _SKIP_WORDS:
+            continue
+        # Require at least one vowel to reduce false positives like
+        # "Btw", "Ok", "Lol" sneaking through.
+        if not any(ch in 'aeiou' for ch in w.lower()):
             continue
         return w
 
