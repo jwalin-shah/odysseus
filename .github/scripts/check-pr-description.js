@@ -1,18 +1,19 @@
 // @ts-check
 'use strict';
 
+// Strip HTML comments so placeholder text does not count as content.
+// Exposed on the module export for direct unit testing.
+function strip(text) {
+  return text.replace(/<!--[\s\S]*?-->/g, '').trim();
+}
+
 /** @param {{ github: import('@octokit/rest').Octokit, context: import('@actions/github').context, core: import('@actions/core') }} */
-module.exports = async ({ github, context, core }) => {
+async function checkPrDescription({ github, context, core }) {
   const body   = context.payload.pull_request.body || '';
   const prNum  = context.payload.pull_request.number;
   const MARKER = '<!-- pr-description-check-bot -->';
   const owner  = context.repo.owner;
   const repo   = context.repo.repo;
-
-  // Strip HTML comments so placeholder text does not count as content.
-  function strip(text) {
-    return (text ?? '').replace(/<!--[\s\S]*?-->/g, '').trim();
-  }
 
   // Extract the text content of a Section. Matches any heading depth (#, ##,
   // ###, …) so the check doesn't break if the template's heading level changes.
@@ -120,4 +121,7 @@ module.exports = async ({ github, context, core }) => {
     await swapLabel(prNum, 'needs work', 'ready for review');
     core.setFailed(`PR description has ${problems.length} issue(s) — see bot comment for details.`);
   }
-};
+}
+
+module.exports = checkPrDescription;
+module.exports.strip = strip;
