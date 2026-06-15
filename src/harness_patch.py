@@ -1,72 +1,97 @@
-import src.inbox_tool as inbox_tool
-
-
-# Metadata keys inside approval_payload that describe routing, not function args.
-_PAYLOAD_META = {"platform", "action", "fn"}
-
-
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
-    """Gate a HarnessResult behind explicit user approval.
+    """Approval gate for HarnessResult actions requiring confirmation.
 
-    - If result.needs_approval is True and confirmed is False, return result
-      unchanged so the caller can render the approval UI.
-    - If result.needs_approval is True and confirmed is True, look up the
-      pending function by name in src.inbox_tool, call it with the remaining
-      approval_payload fields as kwargs, and return a fresh HarnessResult
-      describing the execution outcome.
-    - If result.needs_approval is False, return result unchanged.
+    Behavior:
+      * If ``result.needs_approval`` is False, return ``result`` unchanged.
+      * If ``result.needs_approval`` is True and ``confirmed`` is False,
+        return ``result`` unchanged so the caller can render an approval UI
+        from ``result.approval_payload``.
+      * If ``result.needs_approval`` is True and ``confirmed`` is True, look
+        up the function named in ``approval_payload["fn"]`` on
+        ``src.inbox_tool``, invoke it with the remaining payload entries as
+        kwargs, and return the final ``HarnessResult``.
+
+    The expected approval payload shape is::
+
+        {"platform": "imessage",
+         "action":   "send",
+         "to":       "mom",
+         "body":     "...",
+         "fn":       "send_imessage"}
+
+    ``"fn"`` selects the function on ``inbox_tool``; ``"platform"`` and
+    ``"action"`` are routing/metadata and are NOT forwarded as kwargs.
+    Everything else in the payload is passed to the resolved function as a
+    keyword argument, so the producer of ``approval_payload`` is responsible
+    for matching the target function's signature.
     """
-    # Hold: caller hasn't confirmed yet, surface the pending request as-is.
-    if result.needs_approval and not confirmed:
-        return result
-
-    # Nothing pending; result is already the final answer.
+    # Nothing pending: pass through (covers needs_approval=False and idempotent re-calls).
     if not result.needs_approval:
         return result
 
-    payload = result.approval_payload or {}
-    fn_name = payload.get("fn")
+    # Awaiting user confirmation: pass through so the caller can show the approval UI.
+    if not confirmed:
+        return result
 
+    payload = dict(result.approval_payload or {})
+    fn_name = payload.get("fn")
     if not fn_name:
         return HarnessResult(
-            content="Approval confirmed but approval_payload is missing 'fn'.",
-            action_taken="error",
+            content="Approval payload is missing 'fn' (function name to execute).",
+            action_taken="approval_execute_failed",
             needs_approval=False,
+            approval_payload={},
         )
+
+    # Local import: keeps the module importable even if inbox_tool is unavailable
+    # at import time, and surfaces a clear error path below if it's still missing.
+    from src import inbox_tool
 
     fn = getattr(inbox_tool, fn_name, None)
     if fn is None or not callable(fn):
         return HarnessResult(
-            content=f"Approval confirmed but '{fn_name}' is not an exported "
-                    f"callable on src.inbox_tool.",
-            action_taken="error",
+            content=f"Cannot execute: function '{fn_name}' not found on src.inbox_tool.",
+            action_taken="approval_execute_failed",
             needs_approval=False,
+            approval_payload={},
         )
 
-    # Everything that isn't a routing key becomes a kwarg to the tool.
-    kwargs = {k: v for k, v in payload.items() if k not in _PAYLOAD_META}
+    # Strip routing/metadata keys; forward the rest as kwargs to the function.
+    metadata_keys = {"fn", "platform", "action"}
+    call_kwargs = {k: v for k, v in payload.items() if k not in metadata_keys}
 
     try:
-        out = fn(**kwargs)
-    except TypeError as e:
-        # Wrong kwargs for the resolved function — fail loud so the caller can
-        # surface a useful diagnostic instead of silently doing nothing.
+        output = fn(**call_kwargs)
+    except TypeError as exc:
+        # Most likely cause: payload kwargs don't match the function's signature.
         return HarnessResult(
-            content=f"Refused to call {fn_name}({kwargs!r}): {e}",
-            action_taken="error",
+            content=(
+                f"Failed to execute {fn_name} with kwargs {call_kwargs!r}: {exc}. "
+                "Check that approval_payload matches the function signature."
+            ),
+            action_taken="approval_execute_failed",
             needs_approval=False,
+            approval_payload={},
         )
-    except Exception as e:
+    except Exception as exc:  # noqa: BLE001 - surface any execution error to the caller
         return HarnessResult(
-            content=f"Execution of {fn_name} failed: {e}",
-            action_taken="error",
+            content=f"Error while executing {fn_name}: {exc}",
+            action_taken="approval_execute_failed",
             needs_approval=False,
+            approval_payload={},
         )
 
-    action_label = f"{payload.get('platform', 'unknown')}.{payload.get('action', 'unknown')}"
+    # Normalize the function's return value into a string content field.
+    if isinstance(output, str):
+        content = output
+    elif output is None:
+        content = f"Executed {fn_name} successfully."
+    else:
+        content = str(output)
+
     return HarnessResult(
-        content=out if isinstance(out, str) else str(out),
-        action_taken=action_label,
+        content=content,
+        action_taken=f"approved_{payload.get('action', 'execute')}",
         needs_approval=False,
         approval_payload={},
     )
