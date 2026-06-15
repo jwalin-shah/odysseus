@@ -1,9 +1,15 @@
-import json
-import os
+import copy
 
 
-def _load_file(path: str) -> dict:
-    if not os.path.exists(path):
-        return {}
-    with open(path, 'r') as f:
-        return json.load(f)
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, overlay_value in overlay.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(overlay_value, dict)
+        ):
+            result[key] = _deep_merge(result[key], overlay_value)
+        else:
+            result[key] = copy.deepcopy(overlay_value)
+    return result
