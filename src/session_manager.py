@@ -1,16 +1,23 @@
-from dataclasses import dataclass, field
-import time
+from datetime import datetime
+from typing import List, Dict, Any
 
 
-@dataclass
 class Session:
-    session_id: str
-    owner: str
-    messages = field(default_factory=list)
-    pending_actions = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
+    def __init__(self, session_id: str, user: str):
+        self.session_id = session_id
+        self.user = user
+        self.messages: List[Dict[str, Any]] = []
 
 
-def make_session(session_id: str, owner: str) -> Session:
-    """Create a new Session with the given id and owner, initialized with empty conversation history and pending actions."""
-    return Session(session_id=session_id, owner=owner)
+def make_session(session_id: str, user: str) -> Session:
+    return Session(session_id, user)
+
+
+def append_message(session: Session, role: str, content: str) -> None:
+    """Append a message to the session's conversation history."""
+    message = {
+        'role': role,
+        'content': content,
+        'timestamp': datetime.now().isoformat()
+    }
+    session.messages.append(message)
