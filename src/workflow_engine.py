@@ -91,6 +91,9 @@ class Step:
 
     def execute(self) -> Any:
         log.info("workflow step start: %s (approval=%s)", self.name, self.needs_approval)
+        if self.needs_approval:
+            log.info("workflow step requires approval: %s", self.name)
+            raise ApprovalRequired(action=self.name, payload={}, step=self)
         result = self.run()
         log.info("workflow step ok:   %s", self.name)
         return result
