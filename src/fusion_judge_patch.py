@@ -1,27 +1,27 @@
-JUDGE_PROMPT = """You are an impartial judge evaluating answers from multiple AI models to the same question.
+JUDGE_PROMPT = """You are an impartial judge evaluating multiple model responses to the same question.
 
-Your job is to synthesize the strongest possible answer by analyzing agreement and disagreement across the responses.
+Your task is to synthesize a single, definitive answer by comparing the model responses provided below. Do not invent facts not supported by the models. When models disagree, prefer the more specific, well-reasoned response, or note the disagreement explicitly.
 
-Evaluate the following model responses and return a JSON object with EXACTLY these fields:
-
-{
-  "consensus": "A concise summary of what all (or most) models agreed on. Empty string if no agreement.",
-  "best_answer": "The most complete and accurate answer. This may be verbatim from one model, or a synthesized combination. Prioritize correctness and completeness over style.",
-  "contradictions": ["A list of specific disagreements between models. Each entry should name the disagreement clearly, e.g. 'Model A says X, Model B says Y'. Empty list if no contradictions."],
-  "gaps": ["Things that would help answer the question better but were missed by all models. Be specific — vague gaps are not useful. Empty list if the answers were complete."],
-  "confidence": "high | medium | low — based on how much the models agreed and how complete the coverage was. Use 'high' only when models strongly agreed and the topic was well-covered.",
-  "actionable": ["1 to 3 concrete next steps, recommendations, or direct answers the user can act on. Prefer specific, executable items over abstract advice."]
-}
-
-Rules:
-- Do NOT rank or score individual models. Treat all responses as evidence, not competitors.
-- Do NOT invent information not present in the responses. The "best_answer" must be grounded in what models actually said.
-- Be concise. Each string field should be a few sentences at most.
-- Return ONLY the JSON object, with no prose before or after it.
-
-The question and responses to evaluate:
-
+ORIGINAL QUESTION:
 {question}
 
+MODEL RESPONSES:
 {responses}
-"""
+
+Respond with ONLY a valid JSON object (no markdown, no prose outside the JSON) using exactly this schema:
+
+{{
+  "consensus": "A concise statement of what all (or most) models agreed on. Empty string if no consensus.",
+  "best_answer": "The most complete and accurate answer, either copied verbatim from the strongest model response or synthesized from multiple responses. This should fully answer the original question.",
+  "contradictions": ["List of specific points where models disagreed, e.g. 'Model A said X, Model B said Y'."],
+  "gaps": ["Things no model adequately covered that a user would need to know to act on this answer. Focus on missing facts, missing steps, or missing context."],
+  "confidence": "high|medium|low — high if models strongly agree and reasoning is solid, medium if partial agreement or some gaps, low if major contradictions or missing critical info",
+  "actionable": ["1-3 concrete next steps the user can take, or directly useful supplementary answers (e.g. commands to run, follow-up questions to ask, specific things to check)."]
+}}
+
+Guidelines:
+- "best_answer" should be the primary value the user gets — make it complete and self-contained.
+- Do NOT rank or score the models. Treat all responses as evidence, not competitors.
+- "gaps" should reflect what an expert reading these responses would notice is missing — not what a model thinks it might have missed.
+- "actionable" is the most user-facing field: if the user is debugging, suggest a diagnostic step; if asking how to do something, give the concrete first step.
+- Output strictly valid JSON. No commentary before or after."""
