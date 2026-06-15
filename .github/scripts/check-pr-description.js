@@ -2,8 +2,12 @@
 'use strict';
 
 // Strip HTML comments so placeholder text does not count as content.
-// Exposed on the module export for direct unit testing.
+// Guard against null/undefined so this never throws when fed a missing
+// field on any PR event payload (e.g. pull_request.body can be null on
+// certain webhook deliveries). Exposed on the module export for direct
+// unit testing.
 function strip(text) {
+  if (text == null) return '';
   return text.replace(/<!--[\s\S]*?-->/g, '').trim();
 }
 
