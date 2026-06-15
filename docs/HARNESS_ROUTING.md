@@ -1,5 +1,5 @@
 # Odysseus Request Routing
 
-How a user message becomes an executed action.
+How user text becomes tool calls.
 
-## Flow Diagram
+## Flow Overview
