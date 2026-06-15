@@ -1,244 +1,267 @@
-"""Odysseus startup checker.
-
-Runs a fast, parallel battery of reachability tests against the services
-Odysseus depends on at boot. Each check is bounded by a 3s timeout so a
-single dead dependency cannot stall the launcher.
-
-Checks:
-    1. Inbox HTTP server  — GET http://localhost:9849/health
-    2. TokenRouter API    — one minimal M3 chat completion
-    3. pi CLI             — `pi --version` exits 0
-    4. iMessage DB        — ~/Library/Messages/chat.db exists & is readable
-    5. WhatsApp           — macOS Accessibility API trusted (SKIP if unavailable)
-
-Returns a dict like:
-    {"inbox": True, "tokenrouter": True, "pi": True,
-     "imessage": True, "whatsapp": "skip"}
+#!/usr/bin/env python3
 """
+odysseus_boot.py — Startup checker that verifies Odysseus can reach all services.
+
+Runs five fast, parallel health checks (3s timeout each) and prints a
+colored status table to stdout. Returns a dict of results so the caller
+can branch on success/failure.
+
+    {
+        "inbox":       True,    # http://localhost:9849/health
+        "tokenrouter": True,    # 1 tiny M3 call to the API
+        "pi":          True,    # `pi --version` exits 0
+        "imessage":    True,    # ~/Library/Messages/chat.db readable
+        "whatsapp":    "skip",  # macOS Accessibility probe — OK/FAIL/skip
+    }
+
+Exits with status code 1 if any required check fails (SKIP does not count).
+"""
+
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Dict
 
-# --- Optional deps (resolved lazily so a missing lib doesn't break boot) ---
-try:
-    import aiohttp  # type: ignore
-except ImportError:  # pragma: no cover
-    aiohttp = None  # type: ignore
-
-try:
-    import requests  # type: ignore
-except ImportError:  # pragma: no cover
-    requests = None  # type: ignore
-
-try:
-    from openai import OpenAI  # type: ignore
-except ImportError:  # pragma: no cover
-    OpenAI = None  # type: ignore
+# ── ANSI colors ──────────────────────────────────────────────────────────────
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
 
 
-# --- ANSI palette -----------------------------------------------------------
-class C:
-    RESET  = "\033[0m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    RED    = "\033[31m"
-    GREEN  = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE   = "\033[34m"
-    CYAN   = "\033[36m"
+def _c(text: str, color: str) -> str:
+    """Colorize text — silently pass through if stdout is not a TTY."""
+    return f"{color}{text}{RESET}" if sys.stdout.isatty() else text
 
 
-def _paint(text: str, color: str) -> str:
-    return f"{color}{text}{C.RESET}"
-
-
-def _ok(s: str = "  OK  ")   -> str: return _paint(s, C.GREEN + C.BOLD)
-def _fail(s: str = " FAIL ") -> str: return _paint(s, C.RED   + C.BOLD)
-def _skip(s: str = " SKIP ") -> str: return _paint(s, C.YELLOW + C.BOLD)
-
-
-# --- Configuration ----------------------------------------------------------
-CHECK_TIMEOUT_S: float = 3.0
-INBOX_URL: str         = "http://localhost:9849/health"
-TR_BASE_URL: str       = os.environ.get("ODYSSEUS_TR_BASE",   "https://api.tokenrouter.ai/v1")
-TR_MODEL: str          = os.environ.get("ODYSSEUS_TR_MODEL",  "m3-tiny")
-IMESSAGE_DB: Path      = Path.home() / "Library" / "Messages" / "chat.db"
-
-
-# --- Individual checks ------------------------------------------------------
-async def _check_inbox() -> bool:
-    """1) Inbox HTTP health endpoint."""
-    if aiohttp is not None:
-        try:
-            timeout = aiohttp.ClientTimeout(total=CHECK_TIMEOUT_S)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(INBOX_URL) as resp:
-                    return 200 <= resp.status < 300
-        except Exception:
-            return False
-    if requests is not None:  # pragma: no cover - fallback path
-        def _do() -> bool:
-            try:
-                r = requests.get(INBOX_URL, timeout=CHECK_TIMEOUT_S)
-                return 200 <= r.status_code < 300
-            except Exception:
-                return False
-        return await asyncio.to_thread(_do)
-    return False  # no HTTP client available
-
-
-async def _check_tokenrouter() -> bool:
-    """2) Single minimal M3 chat completion via TokenRouter (OpenAI-compatible)."""
-    api_key = os.environ.get("ODYSSEUS_TR_KEY") or os.environ.get("OPENAI_API_KEY")
-    if OpenAI is None or not api_key:
+# ── Individual checks ────────────────────────────────────────────────────────
+def check_inbox(timeout: float = 3.0) -> bool:
+    """GET http://localhost:9849/health — expect any 2xx."""
+    try:
+        req = urllib.request.Request(
+            "http://localhost:9849/health", method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+    except Exception:
         return False
 
-    def _do() -> bool:
-        try:
-            client = OpenAI(
-                api_key=api_key,
-                base_url=TR_BASE_URL,
-                timeout=CHECK_TIMEOUT_S,
-            )
-            resp = client.chat.completions.create(
-                model=TR_MODEL,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=1,
-                temperature=0.0,
-            )
-            return bool(resp and getattr(resp, "choices", None))
-        except Exception:
-            return False
-    return await asyncio.to_thread(_do)
 
+def check_tokenrouter(timeout: float = 3.0) -> bool:
+    """
+    One tiny M3 call to TokenRouter. Reads configuration from env:
+        TOKENROUTER_API_KEY   (required for a 200, but a 401 still means
+                               the endpoint is reachable — we treat any
+                               HTTP response that isn't a connection
+                               error as success)
+        TOKENROUTER_BASE_URL  (default: https://api.tokenrouter.ai/v1)
+        TOKENROUTER_MODEL     (default: m3-tiny)
+    """
+    base_url = os.environ.get(
+        "TOKENROUTER_BASE_URL", "https://api.tokenrouter.ai/v1"
+    )
+    model = os.environ.get("TOKENROUTER_MODEL", "m3-tiny")
+    api_key = os.environ.get("TOKENROUTER_API_KEY", "")
 
-async def _check_pi() -> bool:
-    """3) `pi --version` resolves and exits 0."""
-    pi_bin = shutil.which("pi")
-    if not pi_bin:
+    payload = (
+        '{"model":"' + model + '",'
+        '"messages":[{"role":"user","content":"ping"}],'
+        '"max_tokens":1,"stream":false}'
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 500  # 4xx means the API is up
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+    except Exception:
         return False
 
-    def _do() -> bool:
-        try:
-            res = subprocess.run(
-                [pi_bin, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=CHECK_TIMEOUT_S,
-                check=False,
-            )
-            return res.returncode == 0
-        except Exception:
-            return False
-    return await asyncio.to_thread(_do)
+
+def check_pi(timeout: float = 3.0) -> bool:
+    """`pi --version` exits 0."""
+    pi_path = shutil.which("pi")
+    if pi_path is None:
+        return False
+    try:
+        result = subprocess.run(
+            [pi_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    except Exception:
+        return False
 
 
-async def _check_imessage() -> bool:
-    """4) iMessage SQLite is on disk and readable."""
-    def _do() -> bool:
-        try:
-            if not IMESSAGE_DB.is_file():
-                return False
-            with open(IMESSAGE_DB, "rb") as f:
-                f.read(16)  # touch a few bytes — proves we can open it
-            return True
-        except OSError:
-            return False
-    return await asyncio.to_thread(_do)
+def check_imessage(timeout: float = 3.0) -> bool:  # noqa: ARG001
+    """~/Library/Messages/chat.db exists and is readable."""
+    db_path = Path.home() / "Library" / "Messages" / "chat.db"
+    if not db_path.exists():
+        return False
+    try:
+        with open(db_path, "rb") as fh:
+            fh.read(16)  # touch the first page
+        return True
+    except (OSError, PermissionError):
+        return False
+    except Exception:
+        return False
 
 
-async def _check_whatsapp() -> Any:
-    """5) macOS Accessibility permission. SKIP on non-macOS or if PyObjC missing."""
+def check_whatsapp(timeout: float = 3.0) -> Any:
+    """
+    Probe macOS Accessibility permission for WhatsApp. Returns:
+        True   — permission granted
+        False  — permission denied
+        "skip" — not on macOS, or framework unavailable
+    """
     if sys.platform != "darwin":
         return "skip"
 
-    def _do() -> Any:
-        try:
-            from ApplicationServices import (  # type: ignore
-                AXIsProcessTrustedWithOptions,
-                kAXTrustedCheckOptionPrompt,
-            )
-        except Exception:
-            return "skip"  # PyObjC / HIServices unavailable
-        try:
-            trusted = bool(
-                AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False})
-            )
-            return True if trusted else "skip"
-        except Exception:
-            return "skip"
-    return await asyncio.to_thread(_do)
-
-
-# --- Orchestration ----------------------------------------------------------
-async def _run_all() -> dict[str, Any]:
-    inbox, tr, pi_ok, im, wa = await asyncio.gather(
-        _check_inbox(),
-        _check_tokenrouter(),
-        _check_pi(),
-        _check_imessage(),
-        _check_whatsapp(),
-    )
-    return {
-        "inbox":       bool(inbox),
-        "tokenrouter": bool(tr),
-        "pi":          bool(pi_ok),
-        "imessage":    bool(im),
-        "whatsapp":    wa,           # True when accessible, else "skip"
-    }
-
-
-def _print_table(results: dict[str, Any]) -> None:
-    rows: list[tuple[str, str, Any]] = [
-        ("Inbox server",    "GET http://localhost:9849/health", results["inbox"]),
-        ("TokenRouter API", f"chat.completions {TR_MODEL}/1tok",  results["tokenrouter"]),
-        ("pi CLI",          "pi --version",                       results["pi"]),
-        ("iMessage DB",     str(IMESSAGE_DB),                     results["imessage"]),
-        ("WhatsApp",        "Accessibility (ApplicationServices)", results["whatsapp"]),
-    ]
-    name_w   = max(len(r[0]) for r in rows)
-    target_w = max(len(r[1]) for r in rows)
-
-    def status(v: Any) -> str:
-        if v is True:   return _ok()
-        if v == "skip": return _skip()
-        return _fail()
-
-    print()
-    print(_paint("  Odysseus boot check", C.BOLD + C.CYAN))
-    rule = "─" * (name_w + target_w + 18)
-    print(_paint(rule, C.DIM))
-    for name, target, value in rows:
-        print(
-            f"  {_paint(name, C.BOLD):<{name_w + 9}}  "
-            f"{_paint(target, C.DIM):<{target_w + 4}}  {status(value)}"
+    # Method 1: pyobjc bridge (most reliable)
+    try:
+        import objc  # type: ignore  # noqa: F401
+        from ApplicationServices import (  # type: ignore
+            AXIsProcessTrusted,
         )
-    print(_paint(rule, C.DIM))
+        return bool(AXIsProcessTrusted())
+    except ImportError:
+        pass
+    except Exception:
+        pass
 
-    passed  = sum(1 for v in results.values() if v is True)
-    skipped = sum(1 for v in results.values() if v == "skip")
-    failed  = sum(1 for v in results.values() if v is False)
-    summary = "  ".join([
-        _paint(f"{passed} passed",  C.GREEN),
-        _paint(f"{failed} failed",   C.RED   if failed  else C.DIM),
-        _paint(f"{skipped} skipped", C.YELLOW if skipped else C.DIM),
-    ])
-    print(f"  {summary}")
+    # Method 2: AppleScript probe via System Events
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to count processes'],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        err = (result.stderr or "").lower()
+        if "not authorized" in err or "assistive access" in err \
+                or "accessibility" in err:
+            return False
+        if result.returncode == 0 and result.stdout.strip().isdigit():
+            return True
+        return "skip"
+    except subprocess.TimeoutExpired:
+        return "skip"
+    except Exception:
+        return "skip"
+
+
+# ── Orchestration ────────────────────────────────────────────────────────────
+CHECKS: Dict[str, Callable[..., Any]] = {
+    "inbox":       check_inbox,
+    "tokenrouter": check_tokenrouter,
+    "pi":          check_pi,
+    "imessage":    check_imessage,
+    "whatsapp":    check_whatsapp,
+}
+
+DEFAULT_TIMEOUT = 3.0
+
+
+def run_checks(timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
+    """Run every check in parallel. Each is bounded by `timeout` seconds."""
+    results: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(CHECKS)
+    ) as ex:
+        futures = {
+            name: ex.submit(fn, timeout) for name, fn in CHECKS.items()
+        }
+        for name, future in futures.items():
+            try:
+                results[name] = future.result(timeout=timeout + 0.5)
+            except Exception:
+                # Preserve the "skip" sentinel for whatsapp on hard errors
+                results[name] = False if name != "whatsapp" else "skip"
+    return results
+
+
+# ── Pretty printing ─────────────────────────────────────────────────────────
+def _format_status(value: Any) -> str:
+    if value is True:
+        return _c("  OK  ", GREEN)
+    if value is False:
+        return _c(" FAIL ", RED)
+    if value == "skip":
+        return _c(" SKIP ", YELLOW)
+    return str(value)
+
+
+def print_table(results: Dict[str, Any]) -> None:
+    """Print a compact, colored status table to stdout."""
+    label_w = max(len("Service"), max(len(k) for k in results))
+    bar = _c("─" * (label_w + 18), DIM)
+
+    print()
+    print(_c(f"{' ODYSSEUS BOOT ':─^50}", BOLD + CYAN))
+    print(bar)
+    print(
+        _c("Service".ljust(label_w), BOLD)
+        + "  "
+        + _c("Status".rjust(8), BOLD)
+    )
+    print(bar)
+    for name, value in results.items():
+        label = name.ljust(label_w)
+        status = _format_status(value)
+        print(f"  {label}  {status}")
+    print(bar)
+
+    n_ok = sum(1 for v in results.values() if v is True)
+    n_fail = sum(1 for v in results.values() if v is False)
+    n_skip = sum(1 for v in results.values() if v == "skip")
+    total = len(results)
+
+    parts = [_c(f"{n_ok}/{total} OK", GREEN)]
+    if n_fail:
+        parts.append(_c(f"{n_fail} FAIL", RED))
+    if n_skip:
+        parts.append(_c(f"{n_skip} SKIP", YELLOW))
+    print("  " + _c("Summary:", BOLD) + "  " + ", ".join(parts))
     print()
 
 
-def check() -> dict[str, Any]:
-    """Public entry point — runs all checks in parallel and returns the dict."""
-    results = asyncio.run(_run_all())
-    _print_table(results)
+# ── Entry point ──────────────────────────────────────────────────────────────
+def main() -> Dict[str, Any]:
+    """Run all checks, print the table, and return the results dict."""
+    results = run_checks()
+    print_table(results)
     return results
 
 
 if __name__ == "__main__":
-    check()
+    result = main()
+    # Non-zero exit if any *required* check failed (SKIP is fine)
+    failed = any(v is False for v in result.values())
+    sys.exit(1 if failed else 0)
