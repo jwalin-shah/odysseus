@@ -1,21 +1,17 @@
-import hashlib
-import json
+def prune_hash_cache(known: dict[str, str], max_entries: int) -> dict[str, str]:
+    """Bound the size of the known-hashes cache.
 
-
-def compute_message_hash(message: dict) -> str:
-    """Compute a deterministic SHA-256 hash for a message dictionary."""
-    serialized = json.dumps(message, sort_keys=True, default=str)
-    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
-
-
-def hash_messages(messages: list) -> dict:
-    """Build a dict mapping each message's hash to the message itself.
-
-    Collapses duplicate messages that share a hash into a single entry.
-    Later messages with the same hash overwrite earlier ones.
+    Keeps the most-recently-inserted ``max_entries`` entries from
+    ``known``, preserving the dict's natural insertion order, to prevent
+    unbounded growth on long-running syncs. Returns a new dict; the
+    input is not modified.
     """
-    result = {}
-    for message in messages:
-        h = compute_message_hash(message)
-        result[h] = message
-    return result
+    if max_entries <= 0:
+        return {}
+    if len(known) <= max_entries:
+        return dict(known)
+
+    # Dict insertion order is guaranteed from Python 3.7+, so slicing
+    # the items list from the end keeps the most recently inserted keys.
+    items = list(known.items())
+    return dict(items[-max_entries:])
