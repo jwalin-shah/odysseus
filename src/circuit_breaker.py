@@ -12,10 +12,11 @@ class CircuitBreaker:
 
     @property
     def state(self):
+        self._maybe_half_open()
         return self._state
 
     @property
-    def failures(self):
+    def fail_count(self):
         return self._failures
 
     @property
