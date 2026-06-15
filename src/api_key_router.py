@@ -1,16 +1,11 @@
-def acquire_next_key(state: dict, keys: list[dict], now: float) -> dict | None:
-    available = []
-    for key in keys:
-        key_id = key["id"]
-        key_state = state.get(key_id, {})
-        if key_state.get("exhausted_until", 0.0) <= now:
-            available.append(key)
+def available_keys(state: dict, keys: list[dict], now: float) -> list[dict]:
+    """Return the subset of keys whose cooldown has expired or which were never marked exhausted.
 
-    if not available:
-        return None
-
-    cursor = state.get("cursor", 0)
-    selected = available[cursor % len(available)]
-    state["cursor"] = cursor + 1
-
-    return selected
+    If any tracked key in the state is currently within its cooldown window (now < exhausted_until),
+    no keys are considered available. Otherwise, all provided keys are returned as available.
+    """
+    for key_state in state.values():
+        exhausted_until = key_state.get("exhausted_until")
+        if exhausted_until is not None and now < exhausted_until:
+            return []
+    return list(keys)
