@@ -1,18 +1,34 @@
-import json
-import datetime
-import os
+"""Approval gate for CLI confirmations."""
 
 
-def record_approval_audit(decision: str, action: dict, log_path: str) -> None:
-    """Append a single audit-log line capturing the decision, action summary, and timestamp."""
-    timestamp = datetime.datetime.now().isoformat()
-    action_summary = json.dumps(action, sort_keys=True)
-    log_line = f"{timestamp} | decision={decision} | action={action_summary}\n"
-    
-    # Ensure the directory exists
-    log_dir = os.path.dirname(log_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    
-    with open(log_path, 'a', encoding='utf-8') as f:
-        f.write(log_line)
+def parse_cli_response(raw: str) -> str:
+    """Parses a raw CLI confirmation response into one of 'approve', 'deny', or 'abort'.
+
+    Recognized affirmative responses (case-insensitive, whitespace-trimmed):
+        - 'y', 'yes'         -> 'approve'
+        - 'n', 'no'          -> 'deny'
+        - 'q', 'quit', 'abort' -> 'abort'
+
+    Args:
+        raw: The raw input string from the CLI.
+
+    Returns:
+        One of the canonical strings: 'approve', 'deny', or 'abort'.
+
+    Raises:
+        TypeError: If ``raw`` is not a string.
+        ValueError: If ``raw`` is not a recognized confirmation response.
+    """
+    if not isinstance(raw, str):
+        raise TypeError(f"Expected str, got {type(raw).__name__}")
+
+    cleaned = raw.strip().lower()
+
+    if cleaned in ("y", "yes"):
+        return "approve"
+    if cleaned in ("n", "no"):
+        return "deny"
+    if cleaned in ("q", "quit", "abort"):
+        return "abort"
+
+    raise ValueError(f"Invalid CLI response: {raw!r}")
