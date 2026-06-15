@@ -1,20 +1,27 @@
 """Prompt templates for function implementation."""
 
-def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
-    """Build a prompt asking the model to implement a function.
+
+def build_implement_fn_prompt(name: str, signature: str, docstring: str | None = None, language: str = 'python') -> str:
+    """Build a prompt instructing an LLM to implement a function.
 
     Args:
-        spec: Specification of the function.
-        signature: Function signature.
-        context: Optional context information.
+        name: The name of the function to implement.
+        signature: The function signature line(s).
+        docstring: Optional docstring describing the function's behavior.
+        language: The programming language for the implementation (default 'python').
 
     Returns:
         The formatted prompt string.
     """
-    return (
-        f"You are a Python expert. Implement the following function based on the specification and signature.\n\n"
-        f"Specification:\n{spec}\n\n"
-        f"Signature:\n{signature}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Please provide the complete function implementation, including any necessary imports and docstrings.\n"
+    parts = [
+        f"You are a {language} expert. Please implement the following function.",
+        f"Function name: {name}",
+        f"Signature:\n{signature}",
+    ]
+    if docstring:
+        parts.append(f"Docstring:\n{docstring}")
+    parts.append(
+        f"Please write the complete implementation of the `{name}` function in {language}, "
+        f"including any necessary imports and type hints."
     )
+    return "\n\n".join(parts) + "\n"
