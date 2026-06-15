@@ -1,6 +1,30 @@
 """Prompt templates for function implementation."""
 
 
+_TEMPLATES: dict = {}
+
+
+def register_template(name: str):
+    """Decorator to register a prompt template builder function.
+
+    Args:
+        name: The template name to register under.
+
+    Returns:
+        A decorator that stores the function in the template registry.
+    """
+    def decorator(func):
+        _TEMPLATES[name] = func
+        return func
+    return decorator
+
+
+def list_template_names() -> list[str]:
+    """Return the names of all prompt templates registered in the library."""
+    return list(_TEMPLATES.keys())
+
+
+@register_template('IMPLEMENT_FN')
 def build_implement_fn_prompt(name: str, signature: str, docstring: str | None = None, language: str = 'python') -> str:
     """Build a prompt instructing an LLM to implement a function.
 
@@ -27,21 +51,27 @@ def build_implement_fn_prompt(name: str, signature: str, docstring: str | None =
     return "\n\n".join(parts) + "\n"
 
 
-def format_prompt_template(template: str, **kwargs: str) -> str:
-    """Substitute ``{name}`` style placeholders in a template string.
+@register_template('REVIEW')
+def build_review_prompt(name: str, code: str, focus: str | None = None) -> str:
+    """Build a prompt instructing an LLM to review code.
 
     Args:
-        template: The template string containing ``{name}`` style placeholders.
-        **kwargs: Keyword arguments whose values will be substituted into the
-            placeholders. Each key in ``kwargs`` must be a valid Python identifier
-            and must match a placeholder name in ``template``.
+        name: The name of the function or component being reviewed.
+        code: The code to review.
+        focus: Optional aspect to focus the review on (e.g., 'security', 'performance').
 
     Returns:
-        The formatted template string with all placeholders replaced by the
-        corresponding keyword argument values.
-
-    Raises:
-        KeyError: If ``template`` contains a placeholder whose name is not
-            present in ``kwargs``.
+        The formatted prompt string.
     """
-    return template.format(**kwargs)
+    parts = [
+        f"You are a code review expert. Please review the following code.",
+        f"Target: {name}",
+        f"Code:\n{code}",
+    ]
+    if focus:
+        parts.append(f"Focus on: {focus}")
+    parts.append(
+        f"Please provide a detailed review of the `{name}` code, "
+        f"pointing out any issues, suggestions for improvement, and best practices."
+    )
+    return "\n\n".join(parts) + "\n"
