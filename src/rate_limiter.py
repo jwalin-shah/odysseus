@@ -3,14 +3,8 @@ import threading
 
 
 class TokenBucket:
-    def __init__(self, capacity: int, rate: float = 1.0) -> None:
-        self.capacity = float(capacity)
-        self.rate = float(rate)
-        self.tokens = float(capacity)
-        self.last_refill = time.monotonic()
+    def __init__(self, rpm: int) -> None:
+        self.capacity = rpm
+        self.refill_rate = rpm / 60
+        self.tokens = float(rpm)
         self.lock = threading.Lock()
-
-    def _refill(self, now: float) -> None:
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-        self.last_refill = now
