@@ -18,6 +18,16 @@ def compute_message_hashes(messages: list) -> list:
     return [compute_message_hash(m) for m in messages]
 
 
+def filter_new_messages(messages: list, seen: set) -> list:
+    """Return the subset of messages whose computed hash is not in the seen set, preserving the input order."""
+    return [m for m in messages if compute_message_hash(m) not in seen]
+
+
 assert compute_message_hashes([]) == []
 assert len(compute_message_hashes([{"id": str(i)} for i in range(5)])) == 5
 assert compute_message_hashes([{"id": "42"}])[0] == compute_message_hash({"id": "42"})
+
+
+assert filter_new_messages([], set()) == []
+assert filter_new_messages([{"id": "1"}], set()) == [{"id": "1"}]
+assert filter_new_messages([{"id": "1"}, {"id": "2"}], {compute_message_hash({"id": "1"})}) == [{"id": "2"}]
