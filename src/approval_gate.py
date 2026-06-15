@@ -1,4 +1,5 @@
 import time
+from typing import Optional, Callable
 
 
 def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
@@ -166,3 +167,26 @@ def gate_write_action(tool_name: str, args: dict, input_fn=None) -> bool:
     # --- Decide ---
     decision = parse_confirmation(response)
     return decision == "approve"
+
+
+def prompt_cli_confirmation(write_intent: dict, input_provider: Optional[Callable[[str], str]] = None) -> str:
+    """Display a formatted confirmation prompt to the CLI and return the raw user response string.
+
+    Renders the fields of ``write_intent`` as a readable summary, asks the
+    user to approve, and returns whatever the input provider yields
+    unchanged. The caller is responsible for interpreting the response
+    (e.g. via ``parse_confirmation``).
+    """
+    if input_provider is None:
+        input_provider = input
+
+    # --- Build a readable prompt from the write intent ---
+    lines = ["Pending action:"]
+    if write_intent:
+        for key, value in write_intent.items():
+            lines.append(f"  {key}: {value}")
+    lines.append("Approve this action? [y/N] ")
+    prompt = "\n".join(lines)
+
+    # --- Hand off to the input provider and return the raw response ---
+    return input_provider(prompt)
