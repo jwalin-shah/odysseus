@@ -1,45 +1,23 @@
-import json
-import os
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
 
 
+@dataclass
 class Session:
-    def __init__(self, session_id, user):
-        self.id = session_id
-        self.user = user
-        self.messages = []
-        self.pending_actions = []
-        self.metadata = {}
+    session_id: str
+    owner: str
+    created_at: str
+    messages: list = field(default_factory=list)
+    pending_actions: list = field(default_factory=list)
 
 
-def make_session(session_id, user):
-    return Session(session_id, user)
-
-
-def append_message(session, role, content):
-    session.messages.append({'role': role, 'content': content})
-
-
-def add_pending_action(session, action_id, action_type, payload):
-    session.pending_actions.append({
-        'id': action_id,
-        'type': action_type,
-        'payload': payload
-    })
-
-
-def persist_session(session, base_dir):
-    os.makedirs(base_dir, exist_ok=True)
-    file_path = os.path.join(base_dir, f"{session.id}.json")
-
-    data = {
-        'id': session.id,
-        'user': session.user,
-        'messages': session.messages,
-        'pending_actions': session.pending_actions,
-        'metadata': session.metadata,
-    }
-
-    with open(file_path, 'w') as f:
-        json.dump(data, f)
-
-    return file_path
+def make_session(session_id: str, owner: str, created_at: str | None = None) -> Session:
+    if created_at is None:
+        created_at = datetime.now(timezone.utc).isoformat()
+    return Session(
+        session_id=session_id,
+        owner=owner,
+        created_at=created_at,
+        messages=[],
+        pending_actions=[],
+    )
