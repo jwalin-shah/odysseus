@@ -4821,3 +4821,47 @@ async def do_ody_supervisor(content: str, owner: Optional[str] = None) -> Dict:
         "result": parsed if parsed is not None else stdout,
         "stderr": stderr[:2000] if stderr else "",
     }
+
+
+async def do_fusion(content: str, owner: Optional[str] = None) -> Dict:
+    """Multi-model panel synthesis tool.
+
+    Dispatches the prompt to a budget panel (MiniMax M3 + DeepSeek V4 Pro +
+    free OpenRouter model) in parallel, runs a judge to produce structured
+    analysis, then synthesizes a final answer via Claude A.
+
+    Args (JSON in content):
+        prompt        (str, required)  — the question or task to fuse over
+        panel         (str, optional)  — "budget" (default) or "frontier"
+        synth_backend (str, optional)  — "ca" (default), "cb", "pioneer", or "m3"
+        return_analysis (bool, optional) — include judge analysis in result
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {"prompt": content}
+    except json.JSONDecodeError:
+        args = {"prompt": content}
+
+    prompt = args.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "fusion requires a non-empty prompt"}
+
+    panel_name = args.get("panel", "budget")
+    synth_backend = args.get("synth_backend", "ca")
+    return_analysis = bool(args.get("return_analysis", False))
+
+    try:
+        from src.fusion import fuse_sync, budget_panel, frontier_panel
+        panel = frontier_panel() if panel_name == "frontier" else budget_panel()
+        result = fuse_sync(
+            prompt,
+            panel=panel,
+            synth_backend=synth_backend,
+            return_analysis=return_analysis,
+        )
+        if return_analysis and isinstance(result, dict):
+            return {"result": result["answer"], "analysis": result["analysis"],
+                    "panel_responses": result["panel_responses"], "panel": panel_name}
+        return {"result": result if isinstance(result, str) else result.get("answer", ""),
+                "panel": panel_name, "synth_backend": synth_backend}
+    except Exception as e:
+        return {"error": f"fusion failed: {e}"}

@@ -68,7 +68,9 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # can show it and toggle it independently.
              "ody_supervisor",
              # Per-agent direct chat + canonical quota (no worktree, no test gate)
-             "tla_chat", "tla_quota"}
+             "tla_chat", "tla_quota",
+             # Multi-model panel synthesis (budget: M3+DeepSeek+OpenRouter → Claude A)
+             "fusion"}
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 

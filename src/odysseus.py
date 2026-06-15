@@ -77,6 +77,71 @@ RESEARCH_WORDS = ("arxiv", "paper", "papers", "literature")
 ANALYZE_WORDS = ("analyze", "analyse", "review", "summarize", "summarise",
                  "diagnose", "explain", "why does", "what is", "audit")
 
+OPERATOR_COMMANDS = {
+    "ask",
+    "chat",
+    "logs",
+    "pilot",
+    "run",
+    "sessions",
+    "start",
+    "status",
+    "stop",
+}
+
+
+def _exec(argv):
+    os.execvp(argv[0], argv)
+
+
+def _operator_command(argv):
+    command = argv[0]
+    rest = argv[1:]
+
+    if command == "run":
+        return rest
+    if command == "chat":
+        _exec([sys.executable, os.path.join(ODY_HOME, "src", "ody_talk.py"), *rest])
+        return 0
+    if command == "pilot":
+        prompt = os.path.join(ODY_HOME, "ORCHESTRATOR.md")
+        with open(prompt, encoding="utf-8") as handle:
+            instructions = handle.read()
+        _exec(["claude", "--append-system-prompt", instructions, *rest])
+        return 0
+    if command == "sessions":
+        _exec(["ody-sessions", *rest])
+        return 0
+    if command == "ask":
+        _exec(["ody-ask", *rest])
+        return 0
+    if command == "logs":
+        log_path = os.path.expanduser("~/Library/Logs/odysseus-server.log")
+        _exec(["tail", "-n", "120", "-f", log_path, *rest])
+        return 0
+
+    label = f"gui/{os.getuid()}/com.odysseus.server"
+    plist = os.path.expanduser("~/Library/LaunchAgents/com.odysseus.server.plist")
+    if command == "start":
+        return subprocess.call(["launchctl", "kickstart", "-k", label])
+    if command == "stop":
+        return subprocess.call(["launchctl", "kill", "SIGTERM", label])
+    if command == "status":
+        health_url = os.environ.get(
+            "ODYSSEUS_HEALTH_URL",
+            "http://127.0.0.1:7860/api/orchestration/health",
+        )
+        try:
+            with urllib.request.urlopen(health_url, timeout=5) as response:
+                health = json.loads(response.read().decode("utf-8"))
+            print(json.dumps(health, indent=2, sort_keys=True))
+            return 0 if health.get("healthy") else 1
+        except Exception as exc:
+            print(f"Odysseus health check failed: {exc}", file=sys.stderr)
+            print(f"LaunchAgent: {plist}", file=sys.stderr)
+            return 1
+    raise AssertionError(f"unhandled operator command: {command}")
+
 
 def classify(mission):
     m = mission.lower()
@@ -279,6 +344,27 @@ def do_analyze(mission, args, docs):
     prompt = (f"{docs}\n\nMISSION (analysis only — do NOT edit files, do NOT run "
               f"write commands; produce a report):\n{mission}" if docs else mission)
     if args.tool is None:
+        # Fusion path: --fuse flag or ODY_FUSE=1 env var enables multi-model panel synthesis.
+        # Budget panel (M3 + DeepSeek + free OpenRouter) synthesized by Claude A.
+        # Skips M3-direct and goes straight to parallel dispatch.
+        use_fusion = getattr(args, "fuse", False) or os.environ.get("ODY_FUSE") == "1"
+        if use_fusion:
+            try:
+                from src.fusion import fuse_sync, budget_panel
+                t0 = time.time()
+                result_data = fuse_sync(
+                    prompt,
+                    panel=budget_panel(),
+                    synth_backend=getattr(args, "synth_backend", "ca"),
+                    return_analysis=True,
+                )
+                answer = result_data["answer"]
+                print(answer)
+                return {"agent_used": "fusion-budget", "result": "ok", "test_passed": None,
+                        "duration": round(time.time() - t0, 1), "output": answer[:2000]}
+            except Exception as e:
+                print(f"[ody] fusion failed ({e}); falling back to m3-direct", file=sys.stderr)
+
         # direct TokenRouter call beats spawning an agent CLI for pure analysis
         try:
             import m3
@@ -535,6 +621,11 @@ def main(argv=None):
     if argv and argv[0] == "supervise":
         from ody_supervisor import supervise_main
         return supervise_main(argv[1:])
+    if argv and argv[0] in OPERATOR_COMMANDS:
+        routed = _operator_command(argv)
+        if isinstance(routed, int):
+            return routed
+        argv = routed
     p = argparse.ArgumentParser(prog="ody", description=__doc__.splitlines()[0])
     p.add_argument("mission", help="what to do, in plain words")
     p.add_argument("--repo", default=os.getcwd(), help="target repo (default: cwd)")
@@ -547,6 +638,10 @@ def main(argv=None):
     p.add_argument("--timeout", type=int, default=900, help="agent timeout seconds")
     p.add_argument("--no-docs", action="store_true", help="skip the 8-doc preamble")
     p.add_argument("--dry-run", action="store_true", help="print routing decision only")
+    p.add_argument("--fuse", action="store_true",
+                   help="use multi-model panel synthesis (budget panel: M3+DeepSeek+free OR) instead of M3-direct")
+    p.add_argument("--synth-backend", default="ca", choices=["ca", "cb", "pioneer", "m3"],
+                   help="backend for fusion final synthesis (default: ca = Claude A subscription)")
     args = p.parse_args(argv)
 
     if args.lane:

@@ -1227,6 +1227,23 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fusion",
+            "description": "Multi-model panel synthesis. Dispatches prompt to budget panel (M3 + DeepSeek + free OpenRouter) in parallel, judge produces structured analysis (consensus, contradictions, unique insights, blind spots), Claude A synthesizes final answer. Use for complex research questions, architecture decisions, or any question worth multiple perspectives.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "The question or task to fuse over. Should be a non-trivial question worth multiple model perspectives."},
+                    "panel": {"type": "string", "enum": ["budget", "frontier"], "description": "Panel to use. budget = M3 + DeepSeek V4 Pro + free OpenRouter (default, near-zero cost). frontier = higher-quality paid models."},
+                    "synth_backend": {"type": "string", "enum": ["ca", "cb", "pioneer", "m3"], "description": "Backend for final synthesis. ca = Claude A subscription (default). pioneer = use only for scarce high-stakes tasks."},
+                    "return_analysis": {"type": "boolean", "description": "If true, include judge's structured analysis alongside the final answer."}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
 ]
 
 
@@ -1408,7 +1425,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
                         "manage_tokens", "manage_documents", "manage_settings",
                         "dispatch_mission", "list_missions", "supervise_missions",
                         "tla_chat", "tla_quota",
-                        "ody_supervisor"):
+                        "ody_supervisor",
+                        "fusion"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")
