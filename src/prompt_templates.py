@@ -27,12 +27,34 @@ _PROMPT_TEMPLATES = {
         "Old text:\n{old_text}\n\n"
         "New text:\n{new_text}\n"
     ),
-    "JUDGE": (
-        "You are an impartial judge evaluating the following task.\n\n"
-        "Task:\n{task}\n\n"
-        "Please carefully analyze the task and provide your assessment, including "
-        "any relevant observations, strengths, weaknesses, and a final verdict."
-    ),
+}
+
+
+# Metadata describing each registered prompt template. ``required_args`` lists the
+# named ``str.format`` placeholders that callers must supply when formatting the
+# template returned by :func:`get_prompt_template`.
+_TEMPLATE_METADATA = {
+    "REVIEW": {
+        "description": (
+            "Senior-engineer code review asking for actionable findings on "
+            "correctness, design, performance, security, style, and tests."
+        ),
+        "required_args": ["code"],
+    },
+    "IMPLEMENT_FN": {
+        "description": (
+            "Prompt asking the model to implement a Python function from a "
+            "specification, signature, and optional context."
+        ),
+        "required_args": ["spec", "signature", "context"],
+    },
+    "SEARCH_REPLACE": {
+        "description": (
+            "Prompt asking the model to perform a search-and-replace edit on "
+            "the contents of a given file."
+        ),
+        "required_args": ["file_path", "old_text", "new_text"],
+    },
 }
 
 
@@ -53,16 +75,27 @@ def get_prompt_template(name: str) -> str:
     return _PROMPT_TEMPLATES[name]
 
 
-def _judge_template() -> str:
-    """Return the judge role prompt template string.
+def get_template_metadata(name: str) -> dict:
+    """Return metadata describing a registered prompt template.
 
-    The template contains a ``{task}`` placeholder that callers fill in
-    with the specific task description to be evaluated by the judge.
+    The metadata describes the template's purpose and the named ``str.format``
+    placeholders callers must supply.
+
+    Args:
+        name: The identifier of the template to look up (e.g. ``"REVIEW"``,
+            ``"IMPLEMENT_FN"``, ``"SEARCH_REPLACE"``).
 
     Returns:
-        The raw judge template string.
+        A dict containing at least:
+
+        - ``"description"`` (``str``): Human-readable summary of the template.
+        - ``"required_args"`` (``list[str]``): Named placeholders that must be
+          supplied to :func:`str.format` for this template.
+
+    Raises:
+        KeyError: If ``name`` does not match any registered template.
     """
-    return _PROMPT_TEMPLATES["JUDGE"]
+    return _TEMPLATE_METADATA[name]
 
 
 def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
@@ -101,8 +134,3 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
     if instruction:
         prompt += f"\n\nAdditional instruction:\n{instruction}"
     return prompt
-
-
-assert isinstance(_judge_template(), str)
-assert '{task}' in _judge_template()
-assert 'judge' in _judge_template().lower()
