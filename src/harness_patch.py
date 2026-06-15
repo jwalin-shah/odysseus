@@ -1,24 +1,12 @@
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
-    """Gate a write action behind explicit user confirmation.
-
-    Behavior:
-      * If ``result.needs_approval`` is False, return ``result`` unchanged.
-      * If ``result.needs_approval`` is True and ``confirmed`` is False,
-        return ``result`` unchanged so the caller can surface an approval UI.
-      * If ``result.needs_approval`` is True and ``confirmed`` is True,
-        look up the action function on ``src.inbox_tool`` by name (via the
-        ``fn`` key in ``approval_payload``), invoke it with the remaining
-        payload keys as kwargs, and return a fresh ``HarnessResult``
-        describing the outcome.
-    """
-    # Read-only or already-executed result: nothing pending, hand it back.
-    if not result.needs_approval:
-        return result
-    # Pending approval but caller hasn't confirmed yet.
-    if not confirmed:
+    """If result.needs_approval and not confirmed, return it unchanged (caller shows approval UI).
+    If confirmed=True, execute the pending action and return the final result."""
+    # Not gated, or caller hasn't approved yet -> bubble the result back as-is.
+    if not result.needs_approval or not confirmed:
         return result
 
-    # Lazy import: keeps write-side modules off the read-only import path.
+    # Local import: keeps the patch self-contained and avoids depending on which
+    # write-action functions are re-exported at module top-level.
     from src import inbox_tool
 
     payload = result.approval_payload or {}
@@ -26,38 +14,36 @@ def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> Harne
 
     if not fn_name:
         return HarnessResult(
-            content="Approval payload is missing the 'fn' dispatch key; cannot execute.",
-            action_taken="confirm_and_execute:missing_fn",
+            content="Approval payload missing 'fn' (function name); cannot execute.",
+            action_taken=result.action_taken,
             needs_approval=False,
-            approval_payload={},
         )
 
     fn = getattr(inbox_tool, fn_name, None)
-    if fn is None or not callable(fn):
+    if fn is None:
         return HarnessResult(
             content=f"Unknown action function '{fn_name}' on src.inbox_tool.",
-            action_taken=f"confirm_and_execute:unknown_fn:{fn_name}",
+            action_taken=result.action_taken,
             needs_approval=False,
-            approval_payload={},
         )
 
-    # Rebuild kwargs from the payload, dropping the dispatch key.
-    # Anything else (e.g. {"to": "mom", "body": "..."}) is forwarded as-is.
-    kwargs = {k: v for k, v in payload.items() if k != "fn"}
+    # Forward every payload field except the metadata keys as kwargs to the action.
+    # e.g. {"platform":"imessage","action":"send","to":"mom","body":"...","fn":"send_imessage"}
+    #      -> send_imessage(to="mom", body="...")
+    _meta = {"platform", "action", "fn"}
+    kwargs = {k: v for k, v in payload.items() if k not in _meta}
 
     try:
         outcome = fn(**kwargs)
-    except Exception as exc:  # noqa: BLE001 - surface failure to caller, don't bubble
+    except Exception as exc:  # surface the failure to the caller; do not raise
         return HarnessResult(
             content=f"Action '{fn_name}' failed: {exc}",
-            action_taken=f"confirm_and_execute:error:{fn_name}",
+            action_taken=result.action_taken,
             needs_approval=False,
-            approval_payload={},
         )
 
     return HarnessResult(
-        content=str(outcome),
-        action_taken=f"executed:{fn_name}",
+        content=str(outcome) if outcome is not None else f"Action '{fn_name}' executed.",
+        action_taken=result.action_taken,
         needs_approval=False,
-        approval_payload={},
     )
