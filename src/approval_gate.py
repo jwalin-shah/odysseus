@@ -1,8 +1,31 @@
-def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
-    lines = [f"Approve {action_name}?"]
-    for key, value in action_args.items():
-        lines.append(f"  {key}: {value}")
-    lines.append("[y/N] ")
+def format_confirmation_prompt(action_summary: str, risk: str) -> str:
+    """Render a CLI prompt asking the user to approve, edit, or abort a write action.
+
+    The risk tier is highlighted visually so the operator can spot dangerous
+    actions at a glance. ANSI colour codes are used when the terminal is
+    likely to be interactive; the literal tier name (e.g. ``HIGH RISK``) is
+    also embedded so plain text consumers and tests can find it.
+    """
+    risk_normalized = (risk or "").strip().lower() or "unknown"
+    if risk_normalized == "high":
+        risk_display = "\033[1;41;97m  HIGH RISK  \033[0m"
+    elif risk_normalized == "medium":
+        risk_display = "\033[1;43;30m  MEDIUM RISK  \033[0m"
+    elif risk_normalized == "low":
+        risk_display = "\033[1;42;30m  LOW RISK  \033[0m"
+    else:
+        risk_display = f"  {risk_normalized.upper()} RISK  "
+
+    border = "-" * max(48, len(action_summary) + 16)
+    lines = [
+        "Pending write action",
+        border,
+        f"  Action : {action_summary}",
+        f"  Risk   : {risk_display}",
+        border,
+        "",
+        "Approve, edit, or abort this action? [y/n] ",
+    ]
     return "\n".join(lines)
 
 
