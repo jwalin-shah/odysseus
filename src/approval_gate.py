@@ -1,4 +1,11 @@
-def action_requires_approval(risk: str, policy: dict) -> bool:
-    """Return True if the action risk level requires approval per policy."""
-    require_approval_for = policy.get('require_approval_for', [])
-    return risk in require_approval_for
+import datetime
+
+
+def build_approval_record(owner: str, action: str, decision: str, reason: str = '') -> dict:
+    return {
+        'owner': owner,
+        'action': action,
+        'decision': decision,
+        'reason': reason,
+        'timestamp': datetime.datetime.now().isoformat(),
+    }
