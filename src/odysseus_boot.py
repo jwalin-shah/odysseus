@@ -1,162 +1,132 @@
+#!/usr/bin/env python3
 """
-odysseus_boot.py — startup checker for the Odysseus runtime.
+Odysseus boot — startup service checker.
 
-Runs a small set of fast, parallel health checks (3s timeout each) against
-every external dependency the agent needs:
+Runs five fast, parallel health checks (3s timeout each):
+  1. inbox server         GET  http://localhost:9849/health
+  2. TokenRouter API      one tiny M3 completion
+  3. pi CLI               `pi --version`
+  4. iMessage DB          ~/Library/Messages/chat.db readable
+  5. WhatsApp a11y        best-effort, returns "skip" on failure
 
-    1. inbox HTTP server      (http://localhost:9849/health)
-    2. TokenRouter API        (one tiny M3 call)
-    3. pi CLI on PATH         (`pi --version`)
-    4. iMessage DB readable   (~/Library/Messages/chat.db)
-    5. WhatsApp accessibility (macOS AX API, OK/SKIP — never fatal)
+Returns a dict like:
+  {"inbox": True, "tokenrouter": True, "pi": True,
+   "imessage": True, "whatsapp": "skip"}
 
-Usage:
-    python -m odysseus_boot        # prints a colored table, returns a dict
-    python -c "from odysseus_boot import run_checks; print(run_checks())"
+Exits 0 if all non-skippable checks pass, 1 otherwise.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
-import shutil
+import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable
 
-# `requests` is the only hard third-party dep; degrade gracefully if missing.
-try:
-    import requests  # type: ignore
-except ImportError:  # pragma: no cover
-    requests = None  # type: ignore
+# ─────────────────────────── timing ────────────────────────────
+TIMEOUT = 3.0  # seconds per check
 
-
-# ---------------------------------------------------------------------------
-# Colored output helpers
-# ---------------------------------------------------------------------------
-
-_NO_COLOR = os.environ.get("NO_COLOR") is not None
-_USE_COLOR = sys.stdout.isatty() and not _NO_COLOR
+# ─────────────────────────── colors ────────────────────────────
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
 def _c(code: str, text: str) -> str:
-    """Wrap `text` in ANSI color codes (no-op if not a TTY)."""
-    if not _USE_COLOR:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
 
 
-def _ok() -> str:    return _c("32", "  ✓ OK   ")
-def _fail() -> str:  return _c("31", "  ✗ FAIL ")
-def _skip() -> str:  return _c("33", "  ~ SKIP ")
+def green(t: str) -> str:  return _c("32", t)
+def red(t: str) -> str:    return _c("31", t)
+def yellow(t: str) -> str: return _c("33", t)
+def dim(t: str) -> str:    return _c("2",  t)
+def bold(t: str) -> str:  return _c("1",  t)
 
 
-# ---------------------------------------------------------------------------
-# Individual checks — each must accept a timeout and return bool | str.
-# ---------------------------------------------------------------------------
+# ─────────────────────────── checks ────────────────────────────
 
-def check_inbox(timeout: float) -> bool:
-    """GET http://localhost:9849/health — 2xx is OK."""
-    if requests is None:
-        return False
+def check_inbox() -> bool:
+    """GET http://localhost:9849/health → 2xx."""
+    url = "http://localhost:9849/health"
     try:
-        r = requests.get("http://localhost:9849/health", timeout=timeout)
-        return 200 <= r.status_code < 300
-    except Exception:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, socket.timeout,
+            ConnectionRefusedError, OSError):
         return False
 
 
-def check_tokenrouter(timeout: float) -> bool:
-    """One tiny M3 call (max_tokens=1) through the TokenRouter proxy."""
-    if requests is None:
-        return False
-    endpoint = os.environ.get(
-        "TOKENROUTER_URL", "http://localhost:9848/v1/messages"
-    )
-    api_key = (
-        os.environ.get("TOKENROUTER_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-    )
-    if not api_key:
-        return False
+def check_tokenrouter() -> bool:
+    """One tiny M3 completion via TokenRouter (OpenAI-compatible)."""
+    base = os.environ.get("TOKENROUTER_URL", "http://localhost:9800/v1")
+    key  = os.environ.get("TOKENROUTER_API_KEY", "sk-noop")
+    url  = f"{base.rstrip('/')}/chat/completions"
+    body = json.dumps({
+        "model": os.environ.get("TOKENROUTER_MODEL", "m3-tiny"),
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+        "temperature": 0,
+    }).encode("utf-8")
     try:
-        r = requests.post(
-            endpoint,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": os.environ.get("TOKENROUTER_MODEL", "MiniMax-M3"),
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "."}],
-            },
-            timeout=timeout,
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {key}"},
         )
-        return r.ok
-    except Exception:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, socket.timeout,
+            ConnectionRefusedError, OSError, ValueError):
         return False
 
 
-def check_pi(timeout: float) -> bool:
+def check_pi() -> bool:
     """`pi --version` exits 0."""
-    pi_path = shutil.which("pi")
-    if not pi_path:
-        return False
     try:
-        result = subprocess.run(
-            [pi_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+        r = subprocess.run(
+            ["pi", "--version"],
+            capture_output=True, text=True, timeout=TIMEOUT,
         )
-        return result.returncode == 0
-    except Exception:
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 
 
-def check_imessage(timeout: float) -> bool:
-    """~/Library/Messages/chat.db exists and is openable."""
+def check_imessage() -> bool:
+    """~/Library/Messages/chat.db exists and is readable."""
     db = Path.home() / "Library" / "Messages" / "chat.db"
-    if not db.exists():
-        return False
     try:
-        # Opening in binary mode is enough to confirm readability on macOS;
-        # the SIP-protected full-disk-access case is a separate concern.
-        with open(db, "rb"):
-            return True
+        return db.is_file() and os.access(db, os.R_OK)
     except OSError:
         return False
 
 
-def check_whatsapp(timeout: float) -> str:
-    """macOS Accessibility API — return 'ok' / 'skip'. Never 'fail'."""
+def check_whatsapp() -> Any:
+    """Best-effort macOS Accessibility probe; never fatal → 'skip' on fail."""
     if sys.platform != "darwin":
         return "skip"
+    script = (
+        'tell application "System Events" to get name of every process '
+        'whose name contains "WhatsApp"'
+    )
     try:
-        # PyObjC path — the canonical macOS way.
-        from ApplicationServices import (  # type: ignore
-            AXIsProcessTrustedWithOptions,
-            kAXTrustedCheckOptionPrompt,
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=TIMEOUT,
         )
-        # Pass False so we *probe* without spawning a system prompt.
-        trusted = bool(
-            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False})
-        )
-        return "ok" if trusted else "skip"
-    except Exception:
-        # No PyObjC, or AX API not reachable from this process — treat as skip.
+        return True if r.returncode == 0 else "skip"
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return "skip"
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
+# ─────────────────────────── runner ────────────────────────────
 
-# Order is also the display order in the table.
-CHECKS: List[Tuple[str, Callable[[float], Any]]] = [
+CHECKS: list[tuple[str, Callable[[], Any]]] = [
     ("inbox",       check_inbox),
     ("tokenrouter", check_tokenrouter),
     ("pi",          check_pi),
@@ -164,88 +134,58 @@ CHECKS: List[Tuple[str, Callable[[float], Any]]] = [
     ("whatsapp",    check_whatsapp),
 ]
 
-CHECK_TIMEOUT = 3.0
 
-
-def run_checks(timeout: float = CHECK_TIMEOUT) -> Dict[str, Any]:
-    """Run all checks in parallel; return a {name: status} dict."""
-    results: Dict[str, Any] = {}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(CHECKS)) as ex:
-        future_to_name = {
-            ex.submit(fn, timeout): name for name, fn in CHECKS
-        }
-        # Outer ceiling: even if a check somehow ignores its timeout, the
-        # whole boot probe still completes within ~timeout+slack seconds.
+def run() -> dict[str, Any]:
+    """Execute all checks in parallel; return result dict."""
+    results: dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(CHECKS)) as pool:
+        futures = {pool.submit(fn): name for name, fn in CHECKS}
         try:
-            done, _ = concurrent.futures.wait(
-                future_to_name.values(),
-                timeout=timeout + 1.0,
-                return_when=concurrent.futures.ALL_COMPLETED,
-            )
-        except Exception:
-            done = set()
-
-        for fut, name in future_to_name.items():
-            if fut not in done or not fut.done():
-                # Timed out — whatsapp is the only one allowed to be 'skip'.
-                results[name] = "skip" if name == "whatsapp" else False
-                continue
-            try:
-                results[name] = fut.result()
-            except Exception:
-                results[name] = "skip" if name == "whatsapp" else False
-
-    # Defensive: ensure every declared check is present in the result dict.
-    for name, _ in CHECKS:
-        results.setdefault(name, "skip" if name == "whatsapp" else False)
-
+            for fut in concurrent.futures.as_completed(
+                futures, timeout=TIMEOUT + 2
+            ):
+                name = futures[fut]
+                try:
+                    results[name] = fut.result()
+                except Exception:
+                    results[name] = "skip" if name == "whatsapp" else False
+        except concurrent.futures.TimeoutError:
+            # Any future that didn't complete in time counts as failure
+            for name, fut in futures.items():
+                if name not in results:
+                    results[name] = "skip" if name == "whatsapp" else False
     return results
 
 
-# ---------------------------------------------------------------------------
-# Pretty printing
-# ---------------------------------------------------------------------------
+# ─────────────────────────── output ────────────────────────────
 
-def _format_status(value: Any) -> str:
-    if value is True:
-        return _ok()
-    if value is False:
-        return _fail()
-    if isinstance(value, str):
-        v = value.lower()
-        if v == "ok":   return _ok()
-        if v == "skip": return _skip()
-    return _c("90", f"  ? {value} ")
+def _fmt(value: Any) -> str:
+    if value is True:   return green("OK  ")
+    if value is False:  return red("FAIL")
+    if value == "skip": return yellow("SKIP")
+    return dim("?   ")
 
 
-def print_table(results: Dict[str, Any]) -> None:
-    name_w = max(len(n) for n, _ in CHECKS) + 2
-    bar = _c("90", "─" * (name_w + 14))
-
-    print(_c("1;97", "Odysseus boot check"))
-    print(bar)
+def print_table(results: dict[str, Any]) -> None:
+    print()
+    print(bold("⚓ Odysseus boot status"))
+    print(dim("─" * 38))
     for name, _ in CHECKS:
-        status = _format_status(results.get(name))
-        print(f"  {_c('97', name.ljust(name_w))}{status}")
-    print(bar)
+        print(f"  {name:<12} {_fmt(results.get(name))}")
+    print(dim("─" * 38))
 
-    # One-line summary — handy for logs / CI.
-    summary = "  ".join(
-        f"{name}={results.get(name)!r}" for name, _ in CHECKS
-    )
-    print(_c("90", summary))
+    failed = [n for n, _ in CHECKS if results.get(n) is False]
+    if failed:
+        print(red(f"  ✗ {len(failed)} failed: {', '.join(failed)}"))
+    else:
+        print(green("  ✓ all systems go"))
+    print()
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-def main() -> Dict[str, Any]:
-    results = run_checks()
-    print_table(results)
-    return results
-
+# ─────────────────────────── main ──────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    results = run()
+    print_table(results)
+    has_failure = any(results.get(n) is False for n, _ in CHECKS)
+    sys.exit(1 if has_failure else 0)
