@@ -1,7 +1,7 @@
 """Prompt templates for function implementation."""
 
 # Raw prompt templates indexed by name. Each template uses named format placeholders
-# (e.g. ``{func_spec}``, ``{language}``, ``{context}``) that the corresponding ``build_*`` helpers fill in.
+# (e.g. ``{spec}``, ``{scope}``) that the corresponding ``build_*`` helpers fill in.
 _PROMPT_TEMPLATES = {
     "REVIEW": (
         "You are a senior software engineer performing a thorough code review.\n\n"
@@ -16,16 +16,16 @@ _PROMPT_TEMPLATES = {
         "Provide your review as a clear, actionable list of findings with suggested improvements."
     ),
     "IMPLEMENT_FN": (
-        "You are a {language} expert. Implement the following function based on the specification and signature.\n\n"
-        "Function specification and signature:\n{func_spec}\n\n"
+        "You are a Python expert. Implement the following function based on the specification and signature.\n\n"
+        "Specification:\n{spec}\n\n"
+        "Signature:\n{signature}\n\n"
         "Context:\n{context}\n\n"
         "Please provide the complete function implementation, including any necessary imports and docstrings.\n"
     ),
     "SEARCH_REPLACE": (
         "You are a code editing assistant. Perform a search-and-replace operation on the file at '{file_path}'.\n\n"
-        "Search text:\n{search_text}\n\n"
-        "Replace text:\n{replace_text}\n\n"
-        "Replace {scope} of the search text with the replace text.\n"
+        "Old text:\n{old_text}\n\n"
+        "New text:\n{new_text}\n"
     ),
 }
 
@@ -47,39 +47,39 @@ def get_prompt_template(name: str) -> str:
     return _PROMPT_TEMPLATES[name]
 
 
-def build_implement_fn_prompt(func_spec: str, language: str = "python", context: str = "") -> str:
-    """Build a prompt instructing the model to implement a function from a signature/spec.
+def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
+    """Build a prompt asking the model to implement a function.
 
     Args:
-        func_spec: The function specification and signature text.
-        language: The target programming language for the implementation
-            (default: ``"python"``).
-        context: Optional additional context information to include in the prompt.
-
-    Returns:
-        The formatted prompt string ready to send to a language model.
-    """
-    template = get_prompt_template("IMPLEMENT_FN")
-    return template.format(func_spec=func_spec, language=language, context=context)
-
-
-def build_search_replace_prompt(file_path: str, search_text: str, replace_text: str, global_replace: bool = False) -> str:
-    """Build a prompt asking an LLM to perform a search-and-replace operation on a file.
-
-    Args:
-        file_path: Path to the file to be modified.
-        search_text: The text to search for in the file.
-        replace_text: The text to replace the search text with.
-        global_replace: If True, replace all occurrences; if False, replace only the first occurrence.
+        spec: Specification of the function.
+        signature: Function signature.
+        context: Optional context information.
 
     Returns:
         The formatted prompt string.
     """
-    scope = "all occurrences" if global_replace else "the first occurrence"
+    template = get_prompt_template("IMPLEMENT_FN")
+    return template.format(spec=spec, signature=signature, context=context)
+
+
+def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, instruction: str = "") -> str:
+    """Build a prompt asking an LLM to perform a search-and-replace operation on a file.
+
+    Args:
+        file_path: Path to the file to be modified.
+        old_text: The text to search for in the file.
+        new_text: The text to replace the old text with.
+        instruction: Optional additional instruction to append to the prompt.
+
+    Returns:
+        The formatted prompt string.
+    """
     template = get_prompt_template("SEARCH_REPLACE")
-    return template.format(
+    prompt = template.format(
         file_path=file_path,
-        search_text=search_text,
-        replace_text=replace_text,
-        scope=scope,
+        old_text=old_text,
+        new_text=new_text,
     )
+    if instruction:
+        prompt += f"\n\nAdditional instruction:\n{instruction}"
+    return prompt
