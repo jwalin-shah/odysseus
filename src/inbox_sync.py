@@ -1,12 +1,14 @@
-import json
-import os
+def diff_new_hashes(remote_hashes: set, local_hashes: set) -> set:
+    """Return the set difference of remote_hashes minus local_hashes.
 
-def load_seen_hashes(path: str) -> set:
-    if not os.path.exists(path):
-        return set()
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-        return set(data) if data else set()
-    except (json.JSONDecodeError, ValueError):
-        return set()
+    This represents newly seen message hashes that exist in the remote
+    set but not in the local set.
+
+    Args:
+        remote_hashes: Set of message hashes from the remote source.
+        local_hashes: Set of message hashes already known locally.
+
+    Returns:
+        A set containing hashes present in remote_hashes but not in local_hashes.
+    """
+    return remote_hashes - local_hashes
