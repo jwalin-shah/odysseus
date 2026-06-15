@@ -1,28 +1,36 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-_sessions: dict[str, list[dict]] = {}
+# In-memory session storage
+_sessions = {}
 
 
-def make_session(session_id: str) -> str:
+def make_session(session_id: str) -> dict:
+    """Create a new session with the given ID and return it."""
+    session = {
+        'id': session_id,
+        'messages': []
+    }
+    _sessions[session_id] = session
+    return session
+
+
+def get_session(session_id: str) -> dict:
+    """Retrieve a session by ID. Raises KeyError if not found."""
     if session_id not in _sessions:
-        _sessions[session_id] = []
-    return session_id
+        raise KeyError(f"Session '{session_id}' not found")
+    return _sessions[session_id]
 
 
 def append_message(session_id: str, role: str, content: str) -> None:
-    if session_id not in _sessions:
-        raise KeyError(f"Session '{session_id}' does not exist")
-    _sessions[session_id].append({
-        "role": role,
-        "content": content,
-        "timestamp": datetime.now().isoformat(),
-    })
+    """Append a new message to the session's conversation history.
 
-
-def get_history(session_id: str, limit: int | None = None) -> list[dict]:
-    if session_id not in _sessions:
-        raise KeyError(f"Session '{session_id}' does not exist")
-    history = _sessions[session_id]
-    if limit is not None:
-        return list(history[-limit:])
-    return list(history)
+    The message is stamped with the current UTC time.
+    Raises KeyError if the session does not exist.
+    """
+    session = get_session(session_id)
+    message = {
+        'role': role,
+        'content': content,
+        'timestamp': datetime.now(timezone.utc),
+    }
+    session['messages'].append(message)
