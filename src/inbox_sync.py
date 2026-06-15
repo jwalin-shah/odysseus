@@ -1,9 +1,3 @@
-import json
-import os
-
-
-def save_sync_watermark(path: str, timestamp: float) -> None:
-    tmp_path = path + '.tmp'
-    with open(tmp_path, 'w') as f:
-        json.dump({'last_sync': timestamp}, f)
-    os.replace(tmp_path, path)
+def merge_new_hashes(cache: set, new_hashes: set) -> set:
+    """Return the union of cache and new_hashes without mutating either input."""
+    return cache | new_hashes
