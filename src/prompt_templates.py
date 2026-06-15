@@ -28,15 +28,19 @@ _PROMPT_TEMPLATES = {
         "New text:\n{new_text}\n"
     ),
     "CRITIC": (
-        "You are a critic. Your role is to critique the risks and weaknesses of a proposed approach for the given task.\n\n"
-        "{task_desc}\n\n"
-        "Please provide a thorough critique covering:\n"
-        "- Potential risks, failure modes, and edge cases that may not be handled.\n"
-        "- Weaknesses or gaps in the proposed approach.\n"
-        "- Assumptions that may not hold and the consequences if they break.\n"
-        "- Trade-offs, costs, complexity, and potential side effects.\n"
-        "- Alternative or complementary approaches worth considering.\n\n"
-        "Provide your critique as a clear, structured list of findings with actionable suggestions for improvement."
+        "You are a critical reviewer. Carefully critique the following task and any proposed approach.\n\n"
+        "Task:\n{task_desc}\n\n"
+        "Identify weaknesses, risks, edge cases, and potential failure modes. Be specific and constructive."
+    ),
+    "VERIFIER": (
+        "You are a meticulous verifier. Verify the following task and its proposed solution against the stated requirements.\n\n"
+        "Task:\n{task_desc}\n\n"
+        "Check for correctness, completeness, and adherence to the specification. Flag any deviations."
+    ),
+    "JUDGE": (
+        "You are an impartial judge. Evaluate the following task and the proposed solution.\n\n"
+        "Task:\n{task_desc}\n\n"
+        "Provide a clear verdict with justification, weighing trade-offs and overall quality."
     ),
 }
 
@@ -56,18 +60,6 @@ def get_prompt_template(name: str) -> str:
         KeyError: If ``name`` does not match any registered template.
     """
     return _PROMPT_TEMPLATES[name]
-
-
-def _format_task_block(task_desc: str) -> str:
-    """Format a task description as a labeled block for inclusion in a prompt.
-
-    Args:
-        task_desc: The task description to format.
-
-    Returns:
-        The formatted task block string.
-    """
-    return f"Task Description:\n{task_desc}"
 
 
 def build_review_prompt(file_path: str, content: str, review_focus: str, severity_filter: str = 'all') -> str:
@@ -135,14 +127,56 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
 
 
 def build_critic_prompt(task_desc: str) -> str:
-    """Build a critic-role gate prompt that critiques risks and weaknesses of a proposed approach.
+    """Build a prompt asking a model to critically review a task description.
 
     Args:
-        task_desc: Description of the task whose proposed approach should be
-            critiqued.
+        task_desc: Description of the task to critique.
 
     Returns:
         The formatted critic prompt string.
     """
     template = get_prompt_template("CRITIC")
-    return template.format(task_desc=_format_task_block(task_desc))
+    return template.format(task_desc=task_desc)
+
+
+def build_verifier_prompt(task_desc: str) -> str:
+    """Build a prompt asking a model to verify a task description.
+
+    Args:
+        task_desc: Description of the task to verify.
+
+    Returns:
+        The formatted verifier prompt string.
+    """
+    template = get_prompt_template("VERIFIER")
+    return template.format(task_desc=task_desc)
+
+
+def build_judge_prompt(task_desc: str) -> str:
+    """Build a prompt asking a model to judge a task description.
+
+    Args:
+        task_desc: Description of the task to judge.
+
+    Returns:
+        The formatted judge prompt string.
+    """
+    template = get_prompt_template("JUDGE")
+    return template.format(task_desc=task_desc)
+
+
+def build_gate_prompts(task_desc: str) -> dict:
+    """Assemble the adaptive gate prompt set for a given task description.
+
+    Args:
+        task_desc: Description of the task being gated.
+
+    Returns:
+        A dictionary with keys ``'critic'``, ``'verifier'``, and ``'judge'``,
+        each mapping to a formatted prompt string that embeds ``task_desc``.
+    """
+    return {
+        'critic': build_critic_prompt(task_desc),
+        'verifier': build_verifier_prompt(task_desc),
+        'judge': build_judge_prompt(task_desc),
+    }
