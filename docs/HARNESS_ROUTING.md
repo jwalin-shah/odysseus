@@ -1,5 +1,5 @@
 # Odysseus Request Routing
 
-How a user message becomes an executed action.
+How a user request flows from text input to executed action.
 
 ## Flow
