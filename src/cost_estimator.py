@@ -115,6 +115,32 @@ def extract_step_usage(step) -> tuple:
     return (str(model_id), int(input_tokens), int(output_tokens))
 
 
+def extract_model_usage(step: dict) -> tuple[str, int, int]:
+    """Extract (model, input_tokens, output_tokens) from a step dict.
+
+    Falls back to nested 'usage' fields and zero defaults.
+    """
+    model = step.get('model', '')
+
+    input_tokens = step.get('input_tokens')
+    if input_tokens is None and isinstance(step.get('usage'), dict):
+        input_tokens = step['usage'].get('input_tokens')
+    if input_tokens is None:
+        input_tokens = 0
+
+    output_tokens = step.get('output_tokens')
+    if output_tokens is None and isinstance(step.get('usage'), dict):
+        output_tokens = step['usage'].get('output_tokens')
+    if output_tokens is None:
+        output_tokens = 0
+
+    return (str(model), int(input_tokens), int(output_tokens))
+
+
 from types import SimpleNamespace
 assert extract_step_usage(SimpleNamespace(model='gpt-4o', input_tokens=1000, output_tokens=500)) == ('gpt-4o', 1000, 500)
 assert extract_step_usage({'model': 'gpt-4o-mini', 'prompt_tokens': 200, 'completion_tokens': 100}) == ('gpt-4o-mini', 200, 100)
+
+assert extract_model_usage({'model': 'gpt-4', 'input_tokens': 100, 'output_tokens': 50}) == ('gpt-4', 100, 50)
+assert extract_model_usage({'model': 'gpt-4'}) == ('gpt-4', 0, 0)
+assert extract_model_usage({'model': 'x', 'usage': {'input_tokens': 5, 'output_tokens': 3}}) == ('x', 5, 3)
