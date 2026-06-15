@@ -1,12 +1,24 @@
-def load_defaults() -> dict:
-    """Return the hardcoded baseline configuration (lowest-priority layer).
+"""Configuration loader module providing built-in default configuration."""
 
-    This dict is overridden by file-based config and environment variables.
+from typing import Dict
+
+
+def load_defaults() -> dict:
+    """Return the built-in default configuration dictionary.
+
+    Provides sensible baseline values for all known configuration keys.
     """
-    return {
-        'debug': False,
-        'db': {
-            'host': 'localhost',
-            'port': 5432,
+    defaults: Dict[str, object] = {
+        "app_name": "odysseus",
+        "debug": False,
+        "version": "1.0.0",
+        "log_level": "INFO",
+        "max_connections": 100,
+        "timeout_seconds": 30,
+        "database": {
+            "host": "localhost",
+            "port": 5432,
+            "name": "odysseus_db",
         },
     }
+    return defaults
