@@ -4,8 +4,8 @@
 # (e.g. ``{spec}``, ``{scope}``) that the corresponding ``build_*`` helpers fill in.
 _PROMPT_TEMPLATES = {
     "REVIEW": (
-        "You are a senior software engineer performing a thorough code review.\n\n"
-        "Please review the following code and provide detailed feedback on:\n"
+        "You are a senior software engineer performing a thorough code review of the file at '{file_path}'.\n\n"
+        "Please review the following code and provide detailed feedback focused on: {review_focus}.\n"
         "- Correctness: Does the code behave as intended for all valid inputs?\n"
         "- Design: Is the code well-structured, modular, and maintainable?\n"
         "- Performance: Are there any obvious performance issues or inefficiencies?\n"
@@ -30,34 +30,6 @@ _PROMPT_TEMPLATES = {
 }
 
 
-# Metadata describing each registered prompt template. ``required_args`` lists the
-# named ``str.format`` placeholders that callers must supply when formatting the
-# template returned by :func:`get_prompt_template`.
-_TEMPLATE_METADATA = {
-    "REVIEW": {
-        "description": (
-            "Senior-engineer code review asking for actionable findings on "
-            "correctness, design, performance, security, style, and tests."
-        ),
-        "required_args": ["code"],
-    },
-    "IMPLEMENT_FN": {
-        "description": (
-            "Prompt asking the model to implement a Python function from a "
-            "specification, signature, and optional context."
-        ),
-        "required_args": ["spec", "signature", "context"],
-    },
-    "SEARCH_REPLACE": {
-        "description": (
-            "Prompt asking the model to perform a search-and-replace edit on "
-            "the contents of a given file."
-        ),
-        "required_args": ["file_path", "old_text", "new_text"],
-    },
-}
-
-
 def get_prompt_template(name: str) -> str:
     """Return the raw template string for a named prompt template.
 
@@ -75,27 +47,30 @@ def get_prompt_template(name: str) -> str:
     return _PROMPT_TEMPLATES[name]
 
 
-def get_template_metadata(name: str) -> dict:
-    """Return metadata describing a registered prompt template.
-
-    The metadata describes the template's purpose and the named ``str.format``
-    placeholders callers must supply.
+def build_review_prompt(file_path: str, content: str, review_focus: str, severity_filter: str = 'all') -> str:
+    """Build a prompt asking a model to critique a file's content against a stated review focus.
 
     Args:
-        name: The identifier of the template to look up (e.g. ``"REVIEW"``,
-            ``"IMPLEMENT_FN"``, ``"SEARCH_REPLACE"``).
+        file_path: Path to the file being reviewed.
+        content: The body of the file to review.
+        review_focus: The aspect of the code to prioritise (e.g. ``"security"``,
+            ``"performance"``, ``"design"``).
+        severity_filter: Optional severity filter restricting the reported
+            findings. Defaults to ``"all"`` (no restriction). When set to any
+            other value, only findings at or above that severity are requested.
 
     Returns:
-        A dict containing at least:
-
-        - ``"description"`` (``str``): Human-readable summary of the template.
-        - ``"required_args"`` (``list[str]``): Named placeholders that must be
-          supplied to :func:`str.format` for this template.
-
-    Raises:
-        KeyError: If ``name`` does not match any registered template.
+        The formatted review prompt string.
     """
-    return _TEMPLATE_METADATA[name]
+    template = get_prompt_template("REVIEW")
+    prompt = template.format(
+        file_path=file_path,
+        code=content,
+        review_focus=review_focus,
+    )
+    if severity_filter and severity_filter != 'all':
+        prompt += f"\n\nOnly report findings of severity: {severity_filter}."
+    return prompt
 
 
 def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
