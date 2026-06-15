@@ -1,134 +1,110 @@
 """Thin wrapper around the inbox server's WhatsApp routes.
 
-The inbox server (default: http://localhost:9849) exposes a small
-WhatsApp bridge that proxies to WhatsApp.app on macOS via the
-Accessibility API. This module is intentionally minimal: it just
-turns the HTTP routes into Python functions and adds a single
-readiness probe so callers get a clear error message instead of
-mysterious empty results.
+The inbox server (default: http://localhost:9849) must be running with
+WhatsApp.app open and Accessibility permission granted on macOS:
+
+    System Settings -> Privacy & Security -> Accessibility
 """
-from __future__ import annotations
-
-from typing import Any
-
 from src.inbox_tool import InboxError, inbox_get, inbox_post
 
 
-BASE_URL = "http://localhost:9849"
+_INSTRUCTIONS = (
+    "WhatsApp bridge is not ready. On macOS, ensure:\n"
+    "  1. WhatsApp.app is open and signed in.\n"
+    "  2. Accessibility permission is granted to this terminal/host app\n"
+    "     (System Settings -> Privacy & Security -> Accessibility).\n"
+    "Then retry the operation."
+)
 
 
-class WhatsAppNotReady(RuntimeError):
-    """Raised when the WhatsApp bridge is not usable.
+class WhatsAppNotReady(Exception):
+    """Raised when the WhatsApp bridge is unavailable.
 
-    On macOS this almost always means one of two things:
-
-      1. **WhatsApp.app is not open** (or not signed in).
-      2. **Accessibility permission has not been granted** to this
-         terminal / process in
-         System Settings → Privacy & Security → Accessibility.
-
-    Fix both, then re-run. The inbox server does not surface a
-    nicely-typed error for these conditions, so we synthesise one
-    here from the symptoms we *can* see: a 403 from the bridge, or
-    a contacts list that comes back empty.
+    Common causes: WhatsApp.app is closed/not signed in, Accessibility
+    permission has not been granted, or the inbox server returned an
+    empty contact list.
     """
 
-    DEFAULT_HINT = (
-        "WhatsApp bridge is not ready. On macOS, make sure:\n"
-        "  1. WhatsApp.app is open and signed in.\n"
-        "  2. This terminal / process has Accessibility permission\n"
-        "     in System Settings → Privacy & Security → Accessibility.\n"
-        "Then try the operation again."
-    )
-
-    def __init__(self, message: str = "", *, hint: str | None = None) -> None:
-        if not message:
-            message = hint or self.DEFAULT_HINT
+    def __init__(
+        self,
+        message: str = _INSTRUCTIONS,
+        *,
+        cause: BaseException | None = None,
+    ) -> None:
         super().__init__(message)
-        self.hint = hint or self.DEFAULT_HINT
+        if cause is not None:
+            self.__cause__ = cause
 
 
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
+def _status_of(err: InboxError) -> int | None:
+    """Best-effort extraction of HTTP status code from an InboxError."""
+    return getattr(err, "status_code", None) or getattr(err, "code", None)
 
-def _is_forbidden(err: InboxError) -> bool:
-    """Best-effort detection of a 403 from inside an InboxError."""
-    for attr in ("status_code", "code", "status"):
-        value = getattr(err, attr, None)
-        if value == 403 or value == "403":
-            return True
-    # Fall back to substring matching against the message — InboxError
-    # may wrap a requests.HTTPError whose str() includes the status.
-    return "403" in str(err) or "forbidden" in str(err).lower()
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def check_ready() -> bool:
-    """Probe the WhatsApp bridge and raise if it isn't usable.
+    """Return True iff /whatsapp/contacts succeeds and is non-empty.
 
-    Returns True on success. Raises WhatsAppNotReady when the bridge
-    rejects access (403) or returns no contacts at all, which is the
-    signal that WhatsApp.app / Accessibility permission are missing.
-
-    Other errors (server down, network unreachable, etc.) propagate as
-    InboxError so the caller can distinguish "bridge is up but WhatsApp
-    is not ready" from "bridge is down entirely".
+    Never raises: readiness issues collapse to False so callers can probe
+    the bridge without try/except boilerplate.
     """
     try:
-        contacts = get_contacts()
-    except InboxError as err:
-        if _is_forbidden(err):
-            raise WhatsAppNotReady() from err
-        raise
-
-    if not contacts:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge returned no contacts. "
-            "Open WhatsApp.app and ensure you are signed in."
-        )
-    return True
+        return bool(get_contacts())
+    except (WhatsAppNotReady, InboxError):
+        return False
 
 
 def get_contacts() -> list:
-    """Return the list of WhatsApp contacts known to the bridge."""
-    return inbox_get(f"{BASE_URL}/whatsapp/contacts")
+    """Return the list of WhatsApp contacts from the inbox server.
+
+    Raises:
+        WhatsAppNotReady: if the server returns 403 (typically Accessibility
+            permission missing) or an empty contact list.
+        InboxError: for any other transport/server error.
+    """
+    try:
+        data = inbox_get("/whatsapp/contacts")
+    except InboxError as e:
+        if _status_of(e) == 403:
+            raise WhatsAppNotReady(cause=e) from e
+        raise
+
+    # Tolerate either {"contacts": [...]} or a bare list response.
+    contacts = data.get("contacts", data) if isinstance(data, dict) else data
+    if not contacts:
+        raise WhatsAppNotReady(
+            "WhatsApp returned no contacts. Is WhatsApp.app open and signed in?"
+        )
+    return list(contacts)
 
 
 def get_thread(contact_id: str, limit: int = 20) -> list:
-    """Return up to `limit` messages from the thread with `contact_id`.
+    """Return up to ``limit`` messages from a contact's WhatsApp thread.
 
-    Newest messages are typically last; the exact ordering is whatever
-    the inbox server hands us.
+    Raises:
+        WhatsAppNotReady: if the inbox server returns 403 (same permission
+            requirement as ``get_contacts``).
+        InboxError: for any other transport/server error.
     """
-    if not contact_id:
-        raise ValueError("contact_id is required")
-    if limit is not None and limit <= 0:
-        raise ValueError("limit must be a positive integer")
+    path = f"/whatsapp/messages/{contact_id}"
+    try:
+        data = inbox_get(path, params={"limit": limit})
+    except InboxError as e:
+        if _status_of(e) == 403:
+            raise WhatsAppNotReady(cause=e) from e
+        raise
 
-    path = f"{BASE_URL}/whatsapp/messages/{contact_id}"
-    params: dict[str, Any] = {}
-    if limit is not None:
-        params["limit"] = int(limit)
-
-    return inbox_get(path, params=params or None)
+    messages = data.get("messages", data) if isinstance(data, dict) else data
+    return list(messages)
 
 
 def send(to: str, body: str) -> dict:
-    """Send a WhatsApp message via the inbox server.
+    """Send a WhatsApp message via ``POST /messages/send``.
 
-    Deliberately NOT gated by check_ready() — the inbox server
-    enforces the actual permission / app-open requirements, and
-    callers that want a pre-flight check should call check_ready()
-    themselves. This keeps `send` cheap and side-effect-only.
+    This function is intentionally NOT gated by readiness checks — sending
+    is treated as an explicit user-initiated action. The caller is
+    responsible for confirming intent and handling transport failures.
     """
-    if not to:
-        raise ValueError("`to` is required")
-    if body is None:
-        raise ValueError("`body` is required")
-
-    payload = {"source": "whatsapp", "to": to, "body": body}
-    return inbox_post(f"{BASE_URL}/messages/send", json=payload)
+    return inbox_post(
+        "/messages/send",
+        {"source": "whatsapp", "to": to, "body": body},
+    )
