@@ -1,11 +1,10 @@
-import time
 import threading
+import time
 
 
 class TokenBucket:
-    def __init__(self, rpm: int) -> None:
-        self._capacity = float(rpm)
-        self._tokens = float(rpm)
-        self._refill_rate = float(rpm) / 60.0
+    def __init__(self, rpm: int, capacity: int | None = None) -> None:
+        self.rpm = rpm
+        self.capacity = capacity if capacity is not None else rpm
+        self._tokens = self.capacity
         self._lock = threading.Lock()
-        self._last_refill = time.monotonic()
