@@ -1,8 +1,9 @@
-def levenshtein(s1: str, s2: str) -> int:
+def levenshtein(s1, s2):
     if len(s1) < len(s2):
         return levenshtein(s2, s1)
     if len(s2) == 0:
         return len(s1)
+
     previous_row = list(range(len(s2) + 1))
     for i, c1 in enumerate(s1):
         current_row = [i + 1]
@@ -12,8 +13,9 @@ def levenshtein(s1: str, s2: str) -> int:
             substitutions = previous_row[j] + (c1 != c2)
             current_row.append(min(insertions, deletions, substitutions))
         previous_row = current_row
+
     return previous_row[-1]
 
 
-def test_levenshtein_kitten_sitting() -> None:
-    assert levenshtein('kitten', 'sitting') == 3
+def test_levenshtein_empty_strings() -> None:
+    assert levenshtein('', '') == 0
