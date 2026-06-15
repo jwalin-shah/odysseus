@@ -1,55 +1,80 @@
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
-    """If result.needs_approval and not confirmed, return it unchanged (caller shows approval UI).
-    If confirmed=True, execute the pending action and return the final result.
+    """Gate write-class actions behind a user approval step.
 
-    The approval payload is expected to look like:
-        {"platform": "imessage",
-         "action":   "send",
-         "to":       "mom",
-         "body":     "...",
-         "fn":       "send_imessage"}
-    Anything in the payload except the metadata keys (fn, action, platform) is passed
-    as kwargs to the looked-up function on src.inbox_tool.
+    Behavior:
+      - If result.needs_approval is False (or payload is empty), return result unchanged.
+      - If result.needs_approval is True and confirmed is False, return result unchanged
+        so the caller can render its approval UI.
+      - If confirmed is True, look up the action function in `src.inbox_tool` by the
+        name stored in result.approval_payload["fn"], invoke it with the remaining
+        payload keys as kwargs, and return a new HarnessResult describing the outcome.
+
+    Expected approval_payload shape:
+        {
+            "platform": "imessage",
+            "action":   "send",
+            "to":       "mom",
+            "body":     "...",
+            "fn":       "send_imessage",
+        }
+    The keys "fn", "action", and "platform" are treated as metadata; everything else
+    is forwarded as kwargs to the resolved function.
     """
-    # Nothing to gate, or caller hasn't approved yet -> hand the result back as-is.
-    if not result.needs_approval or not confirmed:
+    # Nothing pending -> nothing to do.
+    if not result.needs_approval or not result.approval_payload:
         return result
 
-    payload = result.approval_payload or {}
+    # Approval required but not yet granted -> hand back to caller for UI.
+    if not confirmed:
+        return result
+
+    # User confirmed -> resolve and invoke the action function.
+    from src import inbox_tool  # local import to keep module load order safe
+
+    payload = result.approval_payload
     fn_name = payload.get("fn")
     if not fn_name:
         return HarnessResult(
-            content="Approval payload is missing the function name ('fn').",
-            action_taken=result.action_taken,
+            content="Approval payload missing 'fn'; cannot execute pending action.",
+            action_taken="approval_error",
             needs_approval=False,
         )
-
-    # Late import keeps this patch self-contained without changing the top-level imports.
-    import src.inbox_tool as inbox_tool
 
     fn = getattr(inbox_tool, fn_name, None)
     if fn is None or not callable(fn):
         return HarnessResult(
             content=f"Unknown inbox_tool function: {fn_name!r}.",
-            action_taken=result.action_taken,
+            action_taken="approval_error",
             needs_approval=False,
         )
 
-    # Strip the descriptive metadata; the rest are real arguments for the callee.
-    _META = {"fn", "action", "platform"}
-    call_kwargs = {k: v for k, v in payload.items() if k not in _META}
+    # Forward everything except metadata keys as kwargs.
+    kwargs = {
+        k: v for k, v in payload.items() if k not in ("fn", "action", "platform")
+    }
 
     try:
-        outcome = fn(**call_kwargs)
-    except Exception as exc:  # surface the error to the caller instead of raising
+        output = fn(**kwargs)
+    except TypeError as e:
         return HarnessResult(
-            content=f"Action '{fn_name}' failed: {exc}",
-            action_taken=result.action_taken,
+            content=f"Bad arguments for {fn_name}: {e}",
+            action_taken="approval_error",
+            needs_approval=False,
+        )
+    except Exception as e:
+        return HarnessResult(
+            content=f"Error executing {fn_name}: {e}",
+            action_taken="error",
             needs_approval=False,
         )
 
+    action = payload.get("action", "action")
+    platform = payload.get("platform", "")
+    action_taken = f"{platform}_{action}" if platform else action
+    content = str(output) if output is not None else f"{action_taken} completed."
+
     return HarnessResult(
-        content=f"Action '{fn_name}' completed: {outcome}",
-        action_taken=result.action_taken,
+        content=content,
+        action_taken=action_taken,
         needs_approval=False,
     )
