@@ -47,13 +47,16 @@ def _coerce_env_value(value: str) -> object:
     return value
 
 
-def test_deep_merge_b_wins_scalar_conflict() -> None:
-    assert deep_merge({'x': 'old'}, {'x': 'new'}) == {'x': 'new'}
-    assert deep_merge({'a': {'b': 'old'}}, {'a': {'b': 'new'}}) == {'a': {'b': 'new'}}
+def test_deep_merge_non_dict_replace() -> None:
+    """Asserts that when b holds a non-dict (scalar/list/None) at a key where
+    a has a dict, the non-dict value fully replaces the dict."""
+    assert deep_merge({'a': {'x': 1}}, {'a': 7}) == {'a': 7}
+    assert deep_merge({'a': [1, 2]}, {'a': 'scalar'}) == {'a': 'scalar'}
+    assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
 if __name__ == "__main__":
     assert _coerce_env_value('true') is True
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
-    test_deep_merge_b_wins_scalar_conflict()
+    test_deep_merge_non_dict_replace()
