@@ -1,161 +1,136 @@
-"""Tests for :func:`search.find_first_occurrence.find_first_occurrence`."""
+"""Tests for search.find_first_occurrence."""
 
 import pytest
 
 from search.find_first_occurrence import find_first_occurrence
 
 
-# ---------------------------------------------------------------------------
-# String haystack / string needle
-# ---------------------------------------------------------------------------
-
-def test_substring_in_string_basic():
-    """A simple substring should be located at the expected index."""
-    assert find_first_occurrence("hello world", "world") == 6
+def test_target_present_single_occurrence():
+    # Basic case: target appears exactly once in the middle of the list.
+    arr = [1, 3, 5, 7, 9, 11]
+    assert find_first_occurrence(arr, 7) == 3
 
 
-def test_substring_in_string_at_start():
-    """A substring matching the very beginning should return 0."""
-    assert find_first_occurrence("hello world", "hello") == 0
+def test_target_present_multiple_occurrences_returns_first():
+    # When the target appears multiple times, return the *first* index.
+    arr = [1, 2, 2, 2, 3, 4, 5]
+    assert find_first_occurrence(arr, 2) == 1
 
 
-def test_substring_in_string_not_found():
-    """A missing substring must return -1."""
-    assert find_first_occurrence("hello world", "xyz") == -1
+def test_target_absent_returns_negative_one():
+    # Target smaller than the minimum element.
+    assert find_first_occurrence([2, 4, 6, 8], 1) == -1
+    # Target larger than the maximum element.
+    assert find_first_occurrence([2, 4, 6, 8], 10) == -1
+    # Target between two elements (would not exist even in a non-sorted list).
+    assert find_first_occurrence([1, 3, 5, 7, 9], 4) == -1
 
 
-def test_substring_in_string_case_sensitive():
-    """The search must be case sensitive, matching str.find semantics."""
-    assert find_first_occurrence("Hello", "hello") == -1
-    assert find_first_occurrence("Hello", "Hello") == 0
+def test_empty_list_returns_negative_one():
+    assert find_first_occurrence([], 5) == -1
 
 
-def test_substring_returns_first_occurrence():
-    """When the pattern appears multiple times, the *first* index is returned."""
-    assert find_first_occurrence("ababab", "ab") == 0
-    assert find_first_occurrence("ababab", "ba") == 1
+def test_single_element_list_match():
+    assert find_first_occurrence([42], 42) == 0
 
 
-def test_substring_overlapping_patterns():
-    """Overlapping occurrences still return the earliest start index."""
-    assert find_first_occurrence("aaaa", "aa") == 0
-    assert find_first_occurrence("abababab", "abab") == 0
+def test_single_element_list_no_match():
+    assert find_first_occurrence([42], 7) == -1
 
 
-def test_substring_full_match():
-    """A needle equal to the haystack returns 0."""
-    assert find_first_occurrence("hello", "hello") == 0
+def test_target_at_first_position():
+    arr = [1, 2, 3, 4, 5]
+    assert find_first_occurrence(arr, 1) == 0
 
 
-def test_substring_single_character():
-    """Single character look-ups work as expected."""
-    assert find_first_occurrence("abc", "b") == 1
-    assert find_first_occurrence("abc", "z") == -1
+def test_target_at_last_position():
+    arr = [1, 2, 3, 4, 5]
+    assert find_first_occurrence(arr, 5) == 4
 
 
-# ---------------------------------------------------------------------------
-# List / tuple haystack
-# ---------------------------------------------------------------------------
-
-def test_subsequence_in_list_basic():
-    """A sub-list inside a list is located correctly."""
-    assert find_first_occurrence([1, 2, 3, 4, 5], [2, 3]) == 1
+def test_all_duplicates_match_first_index():
+    arr = [4, 4, 4, 4, 4]
+    assert find_first_occurrence(arr, 4) == 0
 
 
-def test_subsequence_in_list_not_found():
-    """A missing sub-list returns -1."""
-    assert find_first_occurrence([1, 2, 3, 4, 5], [6, 7]) == -1
+def test_all_duplicates_no_match():
+    arr = [4, 4, 4, 4, 4]
+    assert find_first_occurrence(arr, 5) == -1
 
 
-def test_subsequence_in_list_full_match():
-    """An exact-match sub-list returns 0."""
-    assert find_first_occurrence([1, 2, 3], [1, 2, 3]) == 0
+def test_negative_numbers():
+    arr = [-10, -5, -3, -1, 0, 2, 4]
+    assert find_first_occurrence(arr, -5) == 1
+    assert find_first_occurrence(arr, -3) == 2
+    assert find_first_occurrence(arr, 0) == 4
 
 
-def test_subsequence_in_list_returns_first():
-    """The earliest matching position is returned for repeated patterns."""
-    assert find_first_occurrence([1, 2, 1, 2, 1, 2], [1, 2]) == 0
-    assert find_first_occurrence([1, 2, 1, 2, 1, 2], [2, 1]) == 1
+def test_duplicate_block_at_start():
+    arr = [2, 2, 2, 3, 4, 5]
+    assert find_first_occurrence(arr, 2) == 0
 
 
-def test_subsequence_in_tuple():
-    """Tuples should be accepted in place of lists."""
-    assert find_first_occurrence((1, 2, 3, 2, 3), (2, 3)) == 1
-    assert find_first_occurrence((1, 2, 3), (4, 5)) == -1
+def test_duplicate_block_in_middle():
+    arr = [1, 2, 3, 3, 3, 4, 5]
+    assert find_first_occurrence(arr, 3) == 2
 
 
-def test_subsequence_in_list_of_strings():
-    """Searching for a sub-list of strings works as well."""
-    assert find_first_occurrence(
-        ["a", "b", "c", "d"], ["b", "c"]
-    ) == 1
+def test_duplicate_block_at_end():
+    arr = [1, 2, 3, 4, 5, 5, 5]
+    assert find_first_occurrence(arr, 5) == 4
 
 
-# ---------------------------------------------------------------------------
-# Edge cases - empty inputs, mismatched lengths
-# ---------------------------------------------------------------------------
-
-def test_empty_needle_in_string_returns_zero():
-    """An empty needle is found at position 0 (matches str.find)."""
-    assert find_first_occurrence("hello", "") == 0
+def test_target_smaller_than_all_elements():
+    arr = [10, 20, 30, 40, 50]
+    assert find_first_occurrence(arr, 0) == -1
 
 
-def test_empty_needle_in_list_returns_zero():
-    """An empty needle is found at position 0 for sequences too."""
-    assert find_first_occurrence([1, 2, 3], []) == 0
-    assert find_first_occurrence([], []) == 0
+def test_target_larger_than_all_elements():
+    arr = [10, 20, 30, 40, 50]
+    assert find_first_occurrence(arr, 100) == -1
 
 
-def test_empty_haystack_with_non_empty_needle_returns_negative_one():
-    """An empty haystack can never contain a non-empty needle."""
-    assert find_first_occurrence("", "hello") == -1
-    assert find_first_occurrence([], [1]) == -1
+def test_two_element_list_match_first():
+    assert find_first_occurrence([1, 2], 1) == 0
 
 
-def test_needle_longer_than_haystack_returns_negative_one():
-    """If the needle is longer than the haystack there is no match."""
-    assert find_first_occurrence("hi", "hello") == -1
-    assert find_first_occurrence([1], [1, 2]) == -1
-    assert find_first_occurrence("", "") == 0  # both empty -> found at 0
+def test_two_element_list_match_second():
+    assert find_first_occurrence([1, 2], 2) == 1
 
 
-def test_non_string_non_sequence_raises_type_error():
-    """Inputs that do not support ``len`` should raise ``TypeError``."""
-    with pytest.raises(TypeError):
-        find_first_occurrence(123, 1)
+def test_two_element_list_no_match():
+    assert find_first_occurrence([1, 2], 3) == -1
 
 
-# ---------------------------------------------------------------------------
-# Consistency checks - behaviour matches str.find / list.index fallback
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "haystack, needle, expected",
-    [
-        ("abcabcabc", "abc", 0),
-        ("abcabcabc", "bca", 1),
-        ("abcabcabc", "cab", 2),
-        ("abcabcabc", "abcd", -1),
-        ("", "a", -1),
-        ("a", "", 0),
-    ],
-)
-def test_string_behaviour_matches_str_find(haystack, needle, expected):
-    """The function's results on strings should mirror ``str.find``."""
-    assert find_first_occurrence(haystack, needle) == expected
+def test_large_sorted_list_binary_search_correctness():
+    # 0..49, then 50 ten times, then 51..99 -> 50 first appears at 50, 99 first
+    # appears at 50 + 10 + 48 = 108, 100 is absent.
+    arr = list(range(50)) + [50] * 10 + list(range(51, 100))
+    assert find_first_occurrence(arr, 50) == 50
+    assert find_first_occurrence(arr, 0) == 0
+    assert find_first_occurrence(arr, 49) == 49
+    assert find_first_occurrence(arr, 99) == 108
+    assert find_first_occurrence(arr, 100) == -1
+    # Sanity: total length is 50 + 10 + 49 = 109, so a valid last index is 108.
+    assert len(arr) == 109
 
 
 @pytest.mark.parametrize(
-    "haystack, needle, expected",
+    "arr,target,expected",
     [
-        ([1, 2, 3, 1, 2, 3], [1, 2], 0),
-        ([1, 2, 3, 1, 2, 3], [2, 3], 1),
-        ([1, 2, 3, 1, 2, 3], [3, 1], 2),
-        ([1, 2, 3], [1, 2, 3, 4], -1),
-        ([], [1], -1),
-        ([1, 2, 3], [], 0),
+        ([], 1, -1),
+        ([1], 1, 0),
+        ([1], 2, -1),
+        ([1, 1, 1], 1, 0),
+        ([1, 2, 3, 4, 5], 3, 2),
+        ([1, 2, 3, 4, 5], 1, 0),
+        ([1, 2, 3, 4, 5], 5, 4),
+        ([1, 2, 3, 4, 5], 6, -1),
+        ([1, 2, 2, 2, 3], 2, 1),
+        ([1, 2, 2, 2, 3], 3, 4),
+        ([-5, -3, -1, 0, 2, 4], -1, 2),
+        ([-5, -3, -1, 0, 2, 4], -6, -1),
     ],
 )
-def test_list_behaviour_is_consistent(haystack, needle, expected):
-    """The function's results on lists should match a manual search."""
-    assert find_first_occurrence(haystack, needle) == expected
+def test_parametrized_cases(arr, target, expected):
+    assert find_first_occurrence(arr, target) == expected
