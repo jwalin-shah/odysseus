@@ -1,10 +1,15 @@
-from dataclasses import dataclass
+import os
+from pathlib import Path
 
-
-@dataclass(frozen=True)
-class Skill:
-    name: str
-    description: str
-    tags: list[str]
-    body: str
-    path: str
+def skills_dir() -> str:
+    """Resolve the absolute path to the skills directory (~/.odysseus/skills/),
+    honoring an ODYSSEUS_SKILLS_DIR env override and creating the directory if missing.
+    """
+    override = os.environ.get('ODYSSEUS_SKILLS_DIR')
+    if override:
+        path = Path(override)
+    else:
+        path = Path.home() / '.odysseus' / 'skills'
+    
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
