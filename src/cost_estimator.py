@@ -1,21 +1,17 @@
-from typing import Tuple
-
-# Pricing data: model name -> (input_usd_per_1k_tokens, output_usd_per_1k_tokens)
-MODEL_PRICING = {
-    'gpt-4': (0.03, 0.06),
-    'gpt-4-turbo': (0.01, 0.03),
-    'gpt-4o': (0.005, 0.015),
-    'gpt-3.5-turbo': (0.0005, 0.0015),
-    'gpt-3.5-turbo-16k': (0.003, 0.004),
-}
-
-# Conservative default pricing for unknown models
-DEFAULT_PRICING = (0.001, 0.002)
+from typing import Dict, Tuple
 
 
-def get_model_pricing(model: str) -> Tuple[float, float]:
-    """Return (input_usd_per_1k_tokens, output_usd_per_1k_tokens) for a model id.
+def sum_tokens_by_model(trajectory_log: list) -> Dict[str, Tuple[int, int]]:
+    result: Dict[str, Tuple[int, int]] = {}
+    for step in trajectory_log:
+        model = step['model']
+        input_tokens = step['input_tokens']
+        output_tokens = step['output_tokens']
+        
+        if model in result:
+            current_input, current_output = result[model]
+            result[model] = (current_input + input_tokens, current_output + output_tokens)
+        else:
+            result[model] = (input_tokens, output_tokens)
     
-    Falls back to a conservative default for unknown models.
-    """
-    return MODEL_PRICING.get(model, DEFAULT_PRICING)
+    return result
