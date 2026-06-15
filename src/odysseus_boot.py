@@ -1,241 +1,284 @@
 #!/usr/bin/env python3
 """Odysseus boot checker — verifies all required services are reachable.
 
-Usage:
-    python -m src.odysseus_boot          # prints a colored status table
-    from src.odysseus_boot import check  # programmatic: returns the dict
+Runs fast, parallel health checks against external dependencies and prints
+a colored status table. Each check is bounded by a 3-second timeout, so
+the worst-case startup cost is ~3s, not 5×3s.
 
-Returned dict shape:
-    {
-        "inbox":       bool,   # inbox server /health
-        "tokenrouter": bool,   # one tiny M3 chat-completion call
-        "pi":          bool,   # `pi --version` exits 0
-        "imessage":    bool,   # ~/Library/Messages/chat.db exists & readable
-        "whatsapp":    True | False | "skip",
-    }
+Usage:
+    python src/odysseus_boot.py
+
+    # Programmatic:
+    from odysseus_boot import run_checks
+    status = run_checks()
+    if not status["inbox"]:
+        sys.exit(1)
+
+Returns:
+    dict with keys: inbox, tokenrouter, pi, imessage, whatsapp
+        - first four are bool (True == OK, False == FAIL)
+        - whatsapp is the str "ok" or "skip" (Accessibility can't be
+          reliably probed from a non-GUI process)
 """
 
 from __future__ import annotations
 
-import json
 import os
+import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Union
+from typing import Callable
 
-CheckResult = Union[bool, str]
-
-
-# ---------------------------------------------------------------------------
-# ANSI color helpers
-# ---------------------------------------------------------------------------
-
-class C:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    CYAN = "\033[96m"
+try:
+    import requests
+except ImportError:
+    sys.stderr.write(
+        "odysseus_boot: 'requests' is required. "
+        "Install with: pip install requests\n"
+    )
+    sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Individual checks — each self-contained with a 3-second budget
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# ANSI styling
+# --------------------------------------------------------------------------- #
 
-def check_inbox_server() -> bool:
-    """GET http://localhost:9849/health within 3s."""
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+
+def _color_enabled() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR") == "1":
+        return True
+    return sys.stdout.isatty()
+
+
+_COLOR = _color_enabled()
+
+
+def c(text: str, color: str) -> str:
+    """Wrap text in ANSI color codes (no-op if stdout isn't a TTY)."""
+    return f"{color}{text}{RESET}" if _COLOR else text
+
+
+# --------------------------------------------------------------------------- #
+# Configuration (override via env vars)
+# --------------------------------------------------------------------------- #
+
+TIMEOUT = float(os.environ.get("ODYSSEUS_BOOT_TIMEOUT", "3.0"))
+
+INBOX_URL = os.environ.get(
+    "ODYSSEUS_INBOX_URL", "http://localhost:9849/health"
+)
+TOKENROUTER_URL = os.environ.get(
+    "ODYSSEUS_TOKENROUTER_URL", "http://localhost:9848/v1/chat/completions"
+)
+TOKENROUTER_MODEL = os.environ.get(
+    "ODYSSEUS_TOKENROUTER_MODEL", "MiniMax-M3"
+)
+TOKENROUTER_API_KEY = os.environ.get(
+    "ODYSSEUS_TOKENROUTER_API_KEY", "sk-no-key-required"
+)
+
+PI_BIN = os.environ.get("ODYSSEUS_PI_BIN", "pi")
+PI_CMD = [PI_BIN, "--version"]
+
+IMESSAGE_DB = Path(
+    os.environ.get(
+        "ODYSSEUS_IMESSAGE_DB",
+        os.path.expanduser("~/Library/Messages/chat.db"),
+    )
+)
+
+
+# --------------------------------------------------------------------------- #
+# Individual checks
+# --------------------------------------------------------------------------- #
+
+def check_inbox() -> bool:
+    """Inbox server health endpoint returns 2xx."""
     try:
-        req = urllib.request.Request(
-            "http://localhost:9849/health", method="GET"
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        r = requests.get(INBOX_URL, timeout=TIMEOUT)
+        return r.ok
+    except requests.RequestException:
         return False
 
 
 def check_tokenrouter() -> bool:
-    """One tiny M3 chat-completion call to TokenRouter (3s budget)."""
-    api_key = os.environ.get("TOKENROUTER_API_KEY") or os.environ.get(
-        "OPENAI_API_KEY"
-    )
-    if not api_key:
-        return False
-    base = (
-        os.environ.get("TOKENROUTER_BASE", "https://api.tokenrouter.ai/v1")
-        .rstrip("/")
-    )
-    body = json.dumps(
-        {
-            "model": "m3-tiny",
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/chat/completions",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
+    """One-token M3 completion — confirms the router is up and routed.
+
+    Uses max_tokens=1 to keep the call as cheap as possible.
+    """
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        r = requests.post(
+            TOKENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {TOKENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": TOKENROUTER_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            },
+            timeout=TIMEOUT,
+        )
+        return r.ok
+    except requests.RequestException:
         return False
 
 
-def check_pi_cli() -> bool:
-    """`pi --version` must exit 0 within 3s."""
+def check_pi() -> bool:
+    """`pi --version` exits 0 (binary is on PATH and runs)."""
+    if shutil.which(PI_BIN) is None:
+        return False
     try:
-        proc = subprocess.run(
-            ["pi", "--version"],
+        result = subprocess.run(
+            PI_CMD,
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=TIMEOUT,
+            check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
-    return proc.returncode == 0
 
 
-def check_imessage_db() -> bool:
-    """Confirm ~/Library/Messages/chat.db exists and is readable."""
-    db = Path.home() / "Library" / "Messages" / "chat.db"
-    if not db.is_file():
+def check_imessage() -> bool:
+    """~/Library/Messages/chat.db exists and is readable."""
+    if not IMESSAGE_DB.exists():
+        return False
+    if not os.access(IMESSAGE_DB, os.R_OK):
         return False
     try:
-        with open(db, "rb") as fh:
-            fh.read(16)  # touch the file to confirm access
+        # Open and read 1 byte to confirm we can actually touch the DB,
+        # not just stat it (macOS Full Disk Access is enforced on open()).
+        with open(IMESSAGE_DB, "rb") as fh:
+            fh.read(1)
         return True
     except OSError:
         return False
 
 
-def check_whatsapp_accessibility() -> CheckResult:
-    """Best-effort check of macOS Accessibility permission for WhatsApp.
+def check_whatsapp() -> str:
+    """macOS-only: probe Accessibility permission via System Events.
 
-    Returns True/False on macOS, "skip" on any other platform or when
-    the probe itself fails (e.g. osascript unavailable).
+    A non-GUI Python process can't directly call the macOS Accessibility
+    API — the user must grant permission to the *parent* app (Terminal,
+    IDE, etc.) in System Settings → Privacy & Security → Accessibility.
+    We make a best-effort AppleScript probe and otherwise return "skip".
     """
     if sys.platform != "darwin":
         return "skip"
-    # Ask System Events about the WhatsApp process.  If TCC has not granted
-    # accessibility, osascript exits non-zero with "not authorized".
+    if shutil.which("osascript") is None:
+        return "skip"
     script = (
-        'tell application "System Events" to '
-        'count of (every process whose name is "WhatsApp")'
+        'tell application "System Events" to count of '
+        '(every process whose name is "WhatsApp")'
     )
     try:
-        proc = subprocess.run(
+        result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=TIMEOUT,
+            check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return "skip"
-    if proc.returncode == 0:
-        return True
-    err = (proc.stderr or "").lower()
-    if "not authorized" in err or "not permitted" in err:
-        return False
-    return "skip"
+    # osascript returns non-zero with "not authorized" in stderr when the
+    # parent process hasn't been granted Accessibility.
+    if result.returncode != 0:
+        return "skip"
+    return "ok"
 
 
-# ---------------------------------------------------------------------------
-# Registry + parallel runner
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Orchestration
+# --------------------------------------------------------------------------- #
 
-CHECKS: dict[str, tuple[str, Callable[[], CheckResult]]] = {
-    "inbox":       ("Inbox server",    check_inbox_server),
-    "tokenrouter": ("TokenRouter API", check_tokenrouter),
-    "pi":          ("pi CLI",          check_pi_cli),
-    "imessage":    ("iMessage DB",     check_imessage_db),
-    "whatsapp":    ("WhatsApp a11y",   check_whatsapp_accessibility),
-}
+def run_checks() -> dict[str, bool | str]:
+    """Run all checks in parallel and return the status dict.
 
+    All checks execute concurrently via a thread pool; the whole call
+    completes in at most ~TIMEOUT seconds regardless of how many checks
+    there are.
+    """
+    checks: list[tuple[str, Callable[[], bool | str]]] = [
+        ("inbox", check_inbox),
+        ("tokenrouter", check_tokenrouter),
+        ("pi", check_pi),
+        ("imessage", check_imessage),
+        ("whatsapp", check_whatsapp),
+    ]
 
-def check() -> dict[str, CheckResult]:
-    """Run every check in parallel and return the results dict."""
-    results: dict[str, CheckResult] = {}
-    with ThreadPoolExecutor(max_workers=len(CHECKS)) as ex:
-        futures = {ex.submit(fn): key for key, (_, fn) in CHECKS.items()}
-        for fut, key in futures.items():
+    # Pre-seed with safe defaults so a raising check still produces a
+    # well-formed dict.
+    results: dict[str, bool | str] = {
+        name: (False if name != "whatsapp" else "skip") for name, _ in checks
+    }
+
+    with ThreadPoolExecutor(max_workers=len(checks)) as ex:
+        futures = {ex.submit(fn): name for name, fn in checks}
+        for fut in as_completed(futures):
+            name = futures[fut]
             try:
-                results[key] = fut.result(timeout=4)
-            except Exception:
-                results[key] = "skip" if key == "whatsapp" else False
-    # Make sure every key is present even on pathological failures.
-    for key, (_, _fn) in CHECKS.items():
-        results.setdefault(key, "skip" if key == "whatsapp" else False)
+                results[name] = fut.result()
+            except Exception:  # noqa: BLE001 — defensive: any crash → FAIL/skip
+                results[name] = False if name != "whatsapp" else "skip"
+
     return results
 
 
-# ---------------------------------------------------------------------------
-# Pretty printing
-# ---------------------------------------------------------------------------
+def print_table(results: dict[str, bool | str]) -> None:
+    """Pretty-print a colored status table to stdout."""
+    order = ["inbox", "tokenrouter", "pi", "imessage", "whatsapp"]
+    rows = [(name, results.get(name)) for name in order]
 
-def _status_cell(value: CheckResult) -> str:
-    if value is True:
-        return f"{C.GREEN}OK  {C.RESET}"
-    if value is False:
-        return f"{C.RED}FAIL{C.RESET}"
-    if isinstance(value, str) and value.lower() == "skip":
-        return f"{C.YELLOW}SKIP{C.RESET}"
-    return f"{C.RED}FAIL{C.RESET}"
+    name_w = max(len(n) for n, _ in rows)
+    rule_w = name_w + 16
 
+    print()
+    print(c("  ⚓ Odysseus Boot", BOLD + CYAN))
+    print(c("  " + "─" * rule_w, DIM))
+    for name, status in rows:
+        if status is True:
+            badge = c("  OK  ", BOLD + GREEN)
+        elif status is False:
+            badge = c(" FAIL ", BOLD + RED)
+        else:  # "ok" or "skip" (any string)
+            badge = c(" SKIP ", BOLD + YELLOW)
+        print(f"  {name:<{name_w}}    {badge}")
+    print(c("  " + "─" * rule_w, DIM))
+    print()
 
-def render_table(results: dict[str, CheckResult]) -> str:
-    label_w = max(len(label) for label, _ in CHECKS.values())
-    key_w = max(len(k) for k in CHECKS)
-
-    lines: list[str] = [
-        f" {C.BOLD}{'SERVICE'.ljust(label_w)}  "
-        f"{'KEY'.ljust(key_w)}  STATUS{C.RESET}",
-        f" {C.DIM}{'-' * (label_w + key_w + 14)}{C.RESET}",
-    ]
-    for key, (label, _) in CHECKS.items():
-        lines.append(
-            f" {label.ljust(label_w)}  "
-            f"{C.CYAN}{key.ljust(key_w)}{C.RESET}  "
-            f"{_status_cell(results.get(key))}"
-        )
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
 
 def main() -> int:
-    # Disable color when output is piped/redirected.
-    if not sys.stdout.isatty():
-        for attr in ("RESET", "BOLD", "DIM", "RED", "GREEN", "YELLOW", "CYAN"):
-            setattr(C, attr, "")
+    """Entry point: run checks, print table, return process exit code."""
+    try:
+        results = run_checks()
+    except Exception as exc:  # noqa: BLE001
+        print(c(f"odysseus_boot: fatal: {exc}", BOLD + RED), file=sys.stderr)
+        return 2
 
-    print(f"{C.BOLD}Odysseus boot check{C.RESET}")
-    results = check()
-    print(render_table(results))
+    print_table(results)
 
-    fails = [k for k, v in results.items() if v is False]
-    if fails:
-        print(
-            f"\n{C.RED}✗ {len(fails)} check(s) failed: "
-            f"{', '.join(fails)}{C.RESET}"
-        )
-        return 1
-    print(f"\n{C.GREEN}✓ all required services reachable{C.RESET}")
-    return 0
+    # Non-zero exit if any *required* check failed. "skip" is not a failure.
+    required_failed = any(
+        v is False for k, v in results.items() if k != "whatsapp"
+    )
+    return 1 if required_failed else 0
 
 
 if __name__ == "__main__":
