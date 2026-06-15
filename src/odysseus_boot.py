@@ -1,259 +1,218 @@
 #!/usr/bin/env python3
-"""Odysseus startup checker.
+"""
+odysseus_boot.py — startup health checks for Odysseus.
 
-Verifies that all services Odysseus depends on are reachable before the
-main process starts. Runs five short checks in parallel, each capped at
-a 3 second timeout, and prints a colored status table to stdout.
+Runs every check in parallel (ThreadPoolExecutor) with a 3-second
+per-check timeout, prints a colored status table to stdout, and
+returns a dict describing the result of each check.
 
-Checks
-------
-1. Inbox server    : GET  http://localhost:9849/health
-2. TokenRouter API : POST a 1-token chat completion
-3. pi CLI          : `pi --version` exits 0
-4. iMessage DB     : ~/Library/Messages/chat.db exists and is readable
-5. WhatsApp a11y   : macOS Accessibility API list (osascript / System Events)
-
-The return value of :func:`run_all` is a dict suitable for programmatic
-consumption::
-
-    {"inbox": True, "tokenrouter": True, "pi": True,
-     "imessage": True, "whatsapp": "skip"}
-
-Each value is either ``True`` (OK), ``False`` (FAIL), or the string
-``"skip"`` for checks that cannot meaningfully run on the current host.
-
-Environment variables
----------------------
-``ODYSSEUS_INBOX_URL``         override inbox health URL
-``ODYSSEUS_TOKENROUTER_URL``   override TokenRouter chat-completions URL
-``ODYSSEUS_TOKENROUTER_MODEL`` model name to send (default: MiniMax-M3)
-``ODYSSEUS_PI_BIN``            override the ``pi`` binary path
-``ODYSSEUS_IMESSAGE_DB``       override the iMessage chat.db path
-``NO_COLOR``                   disable ANSI colors when set
+Usage:
+    python src/odysseus_boot.py
+    ODYSSEUS_INBOX_URL=http://...:9849/health python src/odysseus_boot.py
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Union
+from typing import Callable
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# ── ANSI palette ─────────────────────────────────────────────────────────
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+RED    = "\033[91m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+BLUE   = "\033[94m"
+CYAN   = "\033[96m"
 
-INBOX_URL = os.environ.get(
-    "ODYSSEUS_INBOX_URL", "http://localhost:9849/health"
-)
-TOKENROUTER_URL = os.environ.get(
-    "ODYSSEUS_TOKENROUTER_URL", "http://localhost:9848/v1/chat/completions"
-)
-TOKENROUTER_MODEL = os.environ.get(
-    "ODYSSEUS_TOKENROUTER_MODEL", "MiniMax-M3"
-)
-PI_BIN = os.environ.get("ODYSSEUS_PI_BIN", "pi")
-IMESSAGE_DB = Path(
-    os.environ.get(
-        "ODYSSEUS_IMESSAGE_DB",
-        str(Path.home() / "Library" / "Messages" / "chat.db"),
-    )
-)
-
-CHECK_TIMEOUT_S = 3.0
-
-# ---------------------------------------------------------------------------
-# ANSI colors (auto-disabled on non-TTY or when NO_COLOR is set)
-# ---------------------------------------------------------------------------
-
-_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
-
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_GREEN = "\033[32m"
-_RED = "\033[31m"
-_YELLOW = "\033[33m"
+TIMEOUT_S = 3
+USER_AGENT = "odysseus-boot/1.0"
 
 
-def _c(text: str, code: str) -> str:
-    return f"{code}{text}{_RESET}" if _USE_COLOR else text
+# ── individual checks ───────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Individual checks
-# ---------------------------------------------------------------------------
-
-# A check returns True (OK), False (FAIL), or "skip" (cannot evaluate).
-CheckResult = Union[bool, str]
-
-
-def check_inbox() -> CheckResult:
-    """GET the inbox health endpoint, expect a 2xx response."""
+def check_inbox() -> bool:
+    """GET inbox /health endpoint."""
+    url = os.environ.get("ODYSSEUS_INBOX_URL", "http://localhost:9849/health")
     try:
-        req = urllib.request.Request(INBOX_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT_S) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
             return 200 <= resp.status < 300
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+    except (urllib.error.URLError, OSError, TimeoutError):
         return False
 
 
-def check_tokenrouter() -> CheckResult:
-    """Send a 1-token chat completion through TokenRouter."""
-    payload = json.dumps(
-        {
-            "model": TOKENROUTER_MODEL,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
-    ).encode("utf-8")
+def check_tokenrouter() -> bool:
+    """Send one tiny M3 completion to TokenRouter."""
+    url = os.environ.get(
+        "ODYSSEUS_TOKENROUTER_URL",
+        "http://localhost:9848/v1/chat/completions",
+    )
+    body = json.dumps({
+        "model": "m3",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": False,
+    }).encode("utf-8")
     req = urllib.request.Request(
-        TOKENROUTER_URL,
-        data=payload,
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
         method="POST",
-        headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
             return 200 <= resp.status < 300
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+    except (urllib.error.URLError, OSError, TimeoutError):
         return False
 
 
-def check_pi() -> CheckResult:
-    """Run ``<pi_bin> --version`` and check for a clean exit."""
+def check_pi() -> bool:
+    """Run `pi --version` and inspect the exit code."""
     try:
-        result = subprocess.run(
-            [PI_BIN, "--version"],
+        proc = subprocess.run(
+            ["pi", "--version"],
             capture_output=True,
             text=True,
-            timeout=CHECK_TIMEOUT_S,
+            timeout=TIMEOUT_S,
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return proc.returncode == 0
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
 
 
-def check_imessage() -> CheckResult:
-    """Return True iff the iMessage chat.db exists and is readable."""
+def check_imessage() -> bool:
+    """Confirm ~/Library/Messages/chat.db exists and is readable."""
     try:
-        return IMESSAGE_DB.exists() and os.access(IMESSAGE_DB, os.R_OK)
+        db = Path.home() / "Library" / "Messages" / "chat.db"
+        return db.is_file() and os.access(db, os.R_OK)
     except OSError:
         return False
 
 
-def check_whatsapp() -> CheckResult:
-    """Probe macOS Accessibility via osascript / System Events.
-
-    Non-macOS hosts and any error path return ``"skip"`` because the
-    Accessibility permission state cannot be reliably distinguished from
-    a missing binary or other failure with a single probe.
-    """
+def check_whatsapp() -> bool | str:
+    """Probe macOS Accessibility API (System Events)."""
     if sys.platform != "darwin":
         return "skip"
     try:
-        result = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                'tell application "System Events" to get name of every process',
-            ],
+        proc = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to count of processes'],
             capture_output=True,
             text=True,
-            timeout=CHECK_TIMEOUT_S,
+            timeout=TIMEOUT_S,
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # WhatsApp check never *fails* — OK if we have permission, SKIP otherwise.
+        return True if proc.returncode == 0 else "skip"
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return "skip"
 
 
-# ---------------------------------------------------------------------------
-# Runner + printer
-# ---------------------------------------------------------------------------
+# ── registry ────────────────────────────────────────────────────────────
 
-_CHECKS: dict[str, Callable[[], CheckResult]] = {
-    "inbox": check_inbox,
-    "tokenrouter": check_tokenrouter,
-    "pi": check_pi,
-    "imessage": check_imessage,
-    "whatsapp": check_whatsapp,
-}
-
-_LABELS: dict[str, str] = {
-    "inbox": "Inbox server",
-    "tokenrouter": "TokenRouter API",
-    "pi": "pi CLI",
-    "imessage": "iMessage DB",
-    "whatsapp": "WhatsApp a11y",
-}
-
-_DETAILS: dict[str, str] = {
-    "inbox": INBOX_URL,
-    "tokenrouter": f"{TOKENROUTER_URL}  ({TOKENROUTER_MODEL})",
-    "pi": f"{PI_BIN} --version",
-    "imessage": str(IMESSAGE_DB),
-    "whatsapp": "osascript / System Events",
-}
-
-_ORDER: list[str] = ["inbox", "tokenrouter", "pi", "imessage", "whatsapp"]
+CHECKS: list[tuple[str, str, Callable[[], object]]] = [
+    ("inbox",       "GET  localhost:9849/health",               check_inbox),
+    ("tokenrouter", "1× M3 chat completion",                    check_tokenrouter),
+    ("pi",          "pi --version",                             check_pi),
+    ("imessage",    "~/Library/Messages/chat.db readable",      check_imessage),
+    ("whatsapp",    "macOS Accessibility API (System Events)",  check_whatsapp),
+]
 
 
-def run_all() -> dict[str, CheckResult]:
-    """Run all checks in parallel and return a name -> result dict."""
-    results: dict[str, CheckResult] = {}
-    with ThreadPoolExecutor(max_workers=len(_CHECKS)) as ex:
-        futures = {ex.submit(fn): name for name, fn in _CHECKS.items()}
+# ── runner ──────────────────────────────────────────────────────────────
+
+def run_all() -> dict:
+    """Execute every check concurrently and collect results."""
+    results: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(CHECKS)) as pool:
+        futures = {pool.submit(fn): name for name, _, fn in CHECKS}
         for fut, name in futures.items():
             try:
-                results[name] = fut.result()
+                value = fut.result(timeout=TIMEOUT_S + 1)
             except Exception:
-                # If a check raises unexpectedly, treat it as a hard fail.
-                results[name] = False
+                value = "skip" if name == "whatsapp" else False
+            # WhatsApp is binary OK / SKIP — coerce any False into SKIP.
+            if name == "whatsapp" and value is False:
+                value = "skip"
+            results[name] = value
+    # Defensive backfill in case a future disappears.
+    for name, _, _ in CHECKS:
+        results.setdefault(name, "skip" if name == "whatsapp" else False)
     return results
 
 
-def _format_status(value: CheckResult) -> str:
+# ── rendering ───────────────────────────────────────────────────────────
+
+def _format_status(value: object) -> tuple[str, str]:
+    """Return (color, label) for a check value."""
     if value is True:
-        return _c("OK  ", _GREEN + _BOLD)
+        return GREEN,  "  OK  "
     if value == "skip":
-        return _c("SKIP", _YELLOW + _BOLD)
-    return _c("FAIL", _RED + _BOLD)
+        return YELLOW, " SKIP "
+    return RED, " FAIL "
 
 
-def print_table(results: dict[str, CheckResult]) -> None:
-    """Render a colored, two-column status table to stdout."""
-    label_w = max(len(_LABELS[k]) for k in _ORDER)
-    detail_w = max(len(_DETAILS[k]) for k in _ORDER)
-    rule = _c("─" * (label_w + detail_w + 12), _DIM)
+def render(results: dict) -> None:
+    """Print a colored, aligned status table to stdout."""
+    name_w = max(len(n) for n, _, _ in CHECKS)
+    desc_w = max(len(d) for _, d, _ in CHECKS)
+    bar    = "─" * (name_w + desc_w + 14)
 
-    print(_c("Odysseus boot check", _BOLD))
-    print(rule)
-    for key in _ORDER:
-        label = _LABELS[key].ljust(label_w)
-        detail = _DETAILS[key].ljust(detail_w)
-        status = _format_status(results.get(key, False))
-        print(f"  {label}  {detail}  {status}")
-    print(rule)
+    print()
+    print(f"  {BOLD}{CYAN}⚓ Odysseus Boot{RESET} {DIM}— startup checks{RESET}")
+    print(f"  {DIM}{bar}{RESET}")
+    print(
+        f"  {BOLD}{'check':<{name_w}}{RESET}  "
+        f"{DIM}{'what':<{desc_w}}{RESET}  "
+        f"{BOLD}{'status':>6}{RESET}"
+    )
+    print(f"  {DIM}{bar}{RESET}")
+
+    for name, desc, _ in CHECKS:
+        value = results.get(name, False)
+        color, label = _format_status(value)
+        print(
+            f"  {name:<{name_w}}  "
+            f"{DIM}{desc:<{desc_w}}{RESET}  "
+            f"{color}{BOLD}{label}{RESET}"
+        )
+
+    print(f"  {DIM}{bar}{RESET}")
+
+    n_ok   = sum(1 for v in results.values() if v is True)
+    n_fail = sum(1 for v in results.values() if v is False)
+    n_skip = sum(1 for v in results.values() if v == "skip")
+
+    ok_color   = GREEN  if n_ok   else DIM
+    fail_color = RED    if n_fail else DIM
+    skip_color = YELLOW if n_skip else DIM
+
+    print(
+        f"  {ok_color}{n_ok} ok{RESET}  "
+        f"{fail_color}{n_fail} fail{RESET}  "
+        f"{skip_color}{n_skip} skip{RESET}"
+    )
+    print()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
+# ── entry point ─────────────────────────────────────────────────────────
 
 def main() -> int:
-    """Run the boot check, print the table, and return a process exit code."""
     results = run_all()
-    print_table(results)
-
-    # Any hard FAIL (a False that isn't "skip") means we shouldn't start.
-    hard_fail = any(v is False for v in results.values())
-    return 1 if hard_fail else 0
+    render(results)
+    # Non-zero exit only if a *required* check failed (skip is fine).
+    return 1 if any(v is False for v in results.values()) else 0
 
 
 if __name__ == "__main__":
