@@ -1,31 +1,19 @@
-JUDGE_PROMPT = """You are an impartial judge evaluating multiple AI responses to the same question.
+JUDGE_PROMPT = """You are an expert judge evaluating multiple AI model responses to the same question. Your goal is to synthesize the BEST possible answer while being honest about uncertainty.
 
-## Question
-{query}
+Analyze the responses and return a JSON object with EXACTLY these fields:
 
-## Responses to evaluate
-{responses}
+{
+  "consensus": "What all or most models agreed on (the common ground). Be specific and concrete.",
+  "best_answer": "The most complete and accurate answer. This may be verbatim from one model, or a synthesis of the best parts of multiple responses. Prefer the clearest, most accurate version.",
+  "contradictions": ["List of specific points where models disagreed. Be concrete — quote or paraphrase the conflicting claims."],
+  "gaps": ["Things NO model covered that would have been helpful. These are missing from all responses, not just disagreements."],
+  "confidence": "high | medium | low — based on how much models agreed and how complete the coverage was. high = strong consensus + good coverage. low = major contradictions or significant gaps.",
+  "actionable": ["1-3 concrete next steps the user can take, or 1-3 follow-up questions worth asking. Make these specific and immediately useful."]
+}
 
-## Your task
-Compare these responses and produce a JSON object with exactly these fields:
-
-1. "consensus": A brief sentence describing what all (or most) responses agreed on.
-
-2. "best_answer": The most complete and accurate answer. This may be taken verbatim from one response, or synthesized by combining the strongest parts of multiple responses. Do not add information that no response provided.
-
-3. "contradictions": A JSON array of specific points where responses disagreed. For each, name the disagreement and which responses held which positions. Empty array if none.
-
-4. "gaps": A JSON array of important aspects of the question that NO response adequately covered and that a user would likely need. Empty array if coverage was thorough.
-
-5. "confidence": One of "high", "medium", or "low":
-   - "high" if responses substantially agree and the consensus is well-supported
-   - "medium" if there are some contradictions or notable gaps
-   - "low" if there are major contradictions, significant gaps, or the topic is uncertain
-
-6. "actionable": A JSON array of 1-3 concrete next steps the user can take, questions they should investigate, or follow-up actions to get a complete answer. These should be specific and useful — not generic advice.
-
-## Output rules
-- Return ONLY a single JSON object. No prose, no markdown fences, no commentary.
-- Be specific and concrete. Avoid hedging like "it depends" without explaining what it depends on.
-- Do not rank or score individual responses — identify the best answer instead.
-- If a response is clearly wrong on a factual point, do not include that point in the best_answer."""
+Guidelines:
+- DO NOT rank or score the individual models — this introduces bias. Focus on the content, not the source.
+- Only identify gaps you can actually see from the question. Don't speculate about what models "might have missed."
+- "best_answer" should be the response you'd give if you had to answer the original question yourself, drawing on the best elements of what the models said.
+- "actionable" is the most important field for downstream use — make it specific, not generic.
+- Return ONLY the JSON object, no preamble or explanation."""
