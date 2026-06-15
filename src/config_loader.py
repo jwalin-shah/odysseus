@@ -1,15 +1,18 @@
-import copy
+import json
+import yaml
+from pathlib import Path
 
 
-def _deep_merge(base: dict, overlay: dict) -> dict:
-    result = copy.deepcopy(base)
-    for key, overlay_value in overlay.items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(overlay_value, dict)
-        ):
-            result[key] = _deep_merge(result[key], overlay_value)
+def _load_from_file(path: str) -> dict:
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    
+    suffix = file_path.suffix.lower()
+    with open(file_path, 'r') as f:
+        if suffix == '.json':
+            return json.load(f)
+        elif suffix in ('.yaml', '.yml'):
+            return yaml.safe_load(f)
         else:
-            result[key] = copy.deepcopy(overlay_value)
-    return result
+            raise ValueError(f"Unsupported file format: {path}")
