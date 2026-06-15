@@ -1,22 +1,16 @@
-def recover_expired_keys(state: dict, now: float) -> int:
-    """Clear expired cooldown entries and return the number of keys recovered.
+def acquire_next_key(state: dict, keys: list[dict], now: float) -> dict | None:
+    available = []
+    for key in keys:
+        key_id = key["id"]
+        key_state = state.get(key_id, {})
+        if key_state.get("exhausted_until", 0.0) <= now:
+            available.append(key)
 
-    For each entry in ``state``, if its associated info dict contains an
-    ``exhausted_until`` value that is less than or equal to ``now``, the
-    ``exhausted_until`` field is removed and the recovery counter is
-    incremented by one.
+    if not available:
+        return None
 
-    Args:
-        state: Mapping of key identifiers to their metadata dictionaries.
-        now: Current time (e.g., epoch seconds) used to evaluate expiry.
+    cursor = state.get("cursor", 0)
+    selected = available[cursor % len(available)]
+    state["cursor"] = cursor + 1
 
-    Returns:
-        The number of keys whose cooldown entries were cleared.
-    """
-    recovered = 0
-    for key_info in state.values():
-        if isinstance(key_info, dict) and "exhausted_until" in key_info:
-            if key_info["exhausted_until"] <= now:
-                del key_info["exhausted_until"]
-                recovered += 1
-    return recovered
+    return selected
