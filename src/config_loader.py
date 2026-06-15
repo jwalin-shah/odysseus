@@ -1,4 +1,6 @@
 import copy
+import json
+import os
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -45,6 +47,38 @@ def _coerce_env_value(value: str) -> object:
     except ValueError:
         pass
     return value
+
+
+def _default_config() -> dict:
+    return {
+        "server": {
+            "host": "127.0.0.1",
+            "port": 8000,
+        },
+        "llm": {
+            "timeout": 30,
+        },
+    }
+
+
+def load_config(path: str) -> dict:
+    """Load a JSON config from ``path`` and merge it over the defaults.
+
+    Keys present in the file replace the defaults (recursively for nested
+    dicts). Keys absent from the file keep their default values. If the
+    file is missing or malformed, the defaults are returned unchanged.
+    """
+    defaults = _default_config()
+    if not path or not os.path.isfile(path):
+        return copy.deepcopy(defaults)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            file_config = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return copy.deepcopy(defaults)
+    if not isinstance(file_config, dict):
+        return copy.deepcopy(defaults)
+    return deep_merge(defaults, file_config)
 
 
 def test_deep_merge_non_dict_replace() -> None:
