@@ -2,9 +2,9 @@ import time
 
 
 class CircuitBreaker:
-    def __init__(self, fail_threshold: int, cooldown: float, time_func=time.monotonic) -> None:
+    def __init__(self, fail_threshold, reset_timeout, time_func=time.monotonic):
         self.fail_threshold = fail_threshold
-        self.cooldown = cooldown
+        self.reset_timeout = reset_timeout
         self._time_func = time_func
         self._failures = 0
         self._opened_at = None
@@ -15,11 +15,11 @@ class CircuitBreaker:
         return self._state
 
     @property
-    def failures(self):
+    def fail_count(self):
         return self._failures
 
     @property
-    def fail_count(self):
+    def failures(self):
         return self._failures
 
     @property
@@ -33,7 +33,7 @@ class CircuitBreaker:
             self._opened_at = self._time_func()
 
     def _maybe_half_open(self) -> None:
-        if self._state == 'open' and (self._time_func() - self._opened_at) >= self.cooldown:
+        if self._state == 'open' and (self._time_func() - self._opened_at) >= self.reset_timeout:
             self._state = 'half_open'
 
     def record_success(self) -> None:
