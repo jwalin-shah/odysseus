@@ -1,5 +1,5 @@
-# Odysseus Request Routing
+# Harness Routing
 
-How a user message travels from text to executed action in Odysseus.
+How Odysseus turns a user message into a tool call or model response.
 
-## Flow Diagram
+## Pipeline Overview
