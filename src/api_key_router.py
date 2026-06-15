@@ -12,6 +12,11 @@ class ApiKeyRouter:
         if key not in self._keys:
             self._keys.append(key)
 
+    def total_keys(self) -> int:
+        """Return the total number of API keys the router was configured with,
+        regardless of exhaustion state."""
+        return len(self._keys)
+
     def mark_quota_exhausted(self, key: str) -> None:
         """Flag the given key as quota-exhausted."""
         self._quota_exceeded.add(key)
@@ -22,11 +27,6 @@ class ApiKeyRouter:
         An unknown (never-registered) key is *not* considered exhausted;
         callers should treat that as a separate "unknown key" condition.
         """
-        return key in self._quota_exceeded
-
-    def is_exhausted(self, key: str) -> bool:
-        """Return True if the given key has been marked quota-exhausted and is
-        therefore skipped by the round-robin selector."""
         return key in self._quota_exceeded
 
     def mark_quota_error(self, key: str) -> None:
@@ -44,12 +44,12 @@ class ApiKeyRouter:
 
 
 if __name__ == "__main__":
-    # New spec tests for is_exhausted
-    r = ApiKeyRouter(['a', 'b']); assert r.is_exhausted('a') is False
-
-    r = ApiKeyRouter(['a', 'b']); r.mark_quota_exhausted('a'); assert r.is_exhausted('a') is True
-
-    r = ApiKeyRouter(['a', 'b']); r.mark_quota_exhausted('a'); assert r.is_exhausted('b') is False
+    # New spec tests for total_keys
+    assert ApiKeyRouter(['a', 'b']).total_keys() == 2
+    assert ApiKeyRouter(['x']).total_keys() == 1
+    r = ApiKeyRouter(['a', 'b', 'c'])
+    r.mark_quota_exhausted('a')
+    assert r.total_keys() == 3
 
     # New spec tests for is_quota_exhausted
     r = ApiKeyRouter(); r.register_key('a')
