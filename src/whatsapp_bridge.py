@@ -1,24 +1,14 @@
 """Thin wrapper around the inbox server's WhatsApp routes.
 
-The inbox server (default: http://localhost:9849) exposes three routes for
-interacting with WhatsApp on macOS:
+The inbox server is a small local HTTP service (default
+http://localhost:9849) that exposes WhatsApp operations. WhatsApp itself
+runs through WhatsApp.app on macOS, which must be open with the
+Accessibility permission granted to the inbox server.
 
-    GET  /whatsapp/contacts
-    GET  /whatsapp/messages/{contact_id}
-    POST /messages/send          {source: "whatsapp", to: str, body: str}
-
-Because WhatsApp automation on macOS depends on AppleScript + the macOS
-Accessibility API, the inbox server requires:
-
-    * WhatsApp.app to be running, and
-    * the controlling terminal/process to have Accessibility permission
-      (System Settings -> Privacy & Security -> Accessibility).
-
-This module surfaces a `WhatsAppNotReady` error when those prerequisites
-are not met so callers can show a clear remediation message instead of
-dealing with opaque HTTP errors.
+We surface that runtime requirement as a :class:`WhatsAppNotReady`
+exception with a short fix-it message, so callers can render it back to
+the user instead of a stack trace.
 """
-
 from __future__ import annotations
 
 from typing import Any
@@ -26,194 +16,111 @@ from typing import Any
 from src.inbox_tool import InboxError, inbox_get, inbox_post
 
 
-__all__ = [
-    "WhatsAppNotReady",
-    "check_ready",
-    "get_contacts",
-    "get_thread",
-    "send",
-]
+# HTTP 403 from the inbox server means "WhatsApp is not reachable". We
+# treat it as a readiness failure rather than a transport error because
+# the user can fix it by opening WhatsApp / granting Accessibility.
+_STATUS_FORBIDDEN = 403
 
-
-# Default base URL for the inbox server. Kept here as a constant so tests
-# can monkeypatch it (or so operators can point the bridge at a different
-# host/port without touching the inbox_tool internals).
-INBOX_BASE_URL = "http://localhost:9849"
-
-# Path constants -- isolated so the rest of the codebase (and tests) can
-# reference them without re-typing strings.
-CONTACTS_PATH = "/whatsapp/contacts"
-THREAD_PATH_TEMPLATE = "/whatsapp/messages/{contact_id}"
-SEND_PATH = "/messages/send"
-
-
-# macOS Accessibility permission instructions. Kept as a single string so
-# it can be displayed verbatim in logs, CLI errors, or UI prompts.
-ACCESSIBILITY_INSTRUCTIONS = (
-    "WhatsApp automation requires two things on macOS:\n"
-    "  1. WhatsApp.app must be open and running.\n"
-    "  2. The terminal (or process) running the inbox server must have\n"
-    "     Accessibility permission:\n"
-    "         System Settings -> Privacy & Security -> Accessibility\n"
-    "     Add and enable the relevant Terminal / iTerm / Python entry,\n"
-    "     then restart the inbox server."
+# Short, user-facing instructions shown when WhatsApp is not ready.
+# Kept terse so it can be shown verbatim in a chat reply or log line.
+_READY_INSTRUCTIONS = (
+    "WhatsApp isn't ready. Open WhatsApp on this Mac, then grant "
+    "Accessibility access to the inbox server (System Settings → "
+    "Privacy & Security → Accessibility), and try again."
 )
 
 
 class WhatsAppNotReady(Exception):
-    """Raised when the inbox server cannot reach WhatsApp.
+    """Raised when the WhatsApp routes cannot service a request.
 
-    Typical causes:
-      * WhatsApp.app is not running.
-      * Accessibility permission is not granted to the inbox server.
-      * The inbox server returned an empty contact list (often a sign
-        that WhatsApp has not finished initialising).
+    The inbox server returns HTTP 403 when it cannot talk to WhatsApp
+    (WhatsApp.app is not running, or the Accessibility permission has
+    not been granted). The exception message contains a short fix-it
+    recipe suitable for showing back to the user.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None):
-        super().__init__(message)
-        self.status_code = status_code
 
+def _coerce_list(data: Any) -> list:
+    """Normalize an inbox response into a list.
 
-def _status_from_error(exc: InboxError) -> int | None:
-    """Best-effort extraction of an HTTP status code from an InboxError.
-
-    Different HTTP libraries expose the status code in different places
-    (`.status_code`, `.response.status_code`, `.code`, ...). This helper
-    tries the common ones so the bridge works regardless of which client
-    `inbox_tool` is built on.
+    The inbox server may return either a bare JSON array or an object
+    wrapping one (e.g. ``{"contacts": [...]}``). Anything else is
+    treated as an empty list so callers can iterate safely.
     """
-    for attr in ("status_code", "code"):
-        value = getattr(exc, attr, None)
-        if isinstance(value, int):
-            return value
-    response = getattr(exc, "response", None)
-    if response is not None:
-        value = getattr(response, "status_code", None)
-        if isinstance(value, int):
-            return value
-    return None
-
-
-def _inbox_get_json(path: str) -> Any:
-    """Wrapper around `inbox_get` that normalises 403 into WhatsAppNotReady.
-
-    The inbox server returns 403 when the Accessibility permission check
-    fails. We surface that as `WhatsAppNotReady` so callers do not need
-    to know about HTTP status codes.
-    """
-    try:
-        return inbox_get(path)
-    except InboxError as exc:
-        if _status_from_error(exc) == 403:
-            raise WhatsAppNotReady(
-                f"Inbox server denied access to {path} (HTTP 403).\n"
-                f"{ACCESSIBILITY_INSTRUCTIONS}",
-                status_code=403,
-            ) from exc
-        raise
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("contacts", "messages", "items", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
 
 
 def check_ready() -> bool:
-    """Return True if the inbox server can talk to WhatsApp.
+    """Return True if WhatsApp is usable, otherwise raise.
 
-    This is a non-throwing probe: it returns False on any failure
-    (network error, permission error, empty contact list) so it can be
-    used as a simple health check from CLI, tests, or startup banners.
+    A "not ready" condition is either:
+
+    * the inbox server returns HTTP 403 for the contacts route, or
+    * the contacts list is empty (fresh install, or a session that
+      hasn't synced yet).
+
+    The ``bool`` return type describes the success path. On failure
+    the function raises :class:`WhatsAppNotReady` with a short
+    remediation message, so callers don't have to special-case 403 or
+    empty lists themselves.
     """
-    try:
-        contacts = get_contacts()
-    except (WhatsAppNotReady, InboxError):
-        return False
-    return bool(contacts)
+    contacts = get_contacts()  # raises WhatsAppNotReady on 403
+    if not contacts:
+        raise WhatsAppNotReady(_READY_INSTRUCTIONS)
+    return True
 
 
 def get_contacts() -> list:
-    """Return the list of WhatsApp contacts from the inbox server.
+    """Return the WhatsApp contact list from the inbox server.
 
-    Raises:
-        WhatsAppNotReady: if the server returns 403 (Accessibility
-            permission missing) or an empty list (WhatsApp.app not
-            running / not yet initialised).
+    Raises :class:`WhatsAppNotReady` if the inbox server responds with
+    HTTP 403 — that means WhatsApp.app is not open or the Accessibility
+    permission has not been granted. An empty list is *not* an error
+    here; use :func:`check_ready` if you want the stricter check.
     """
-    payload = _inbox_get_json(CONTACTS_PATH)
-
-    # The inbox server is expected to return a JSON array. Be defensive
-    # in case it returns an object wrapper like `{"contacts": [...]}`.
-    if isinstance(payload, dict):
-        contacts = payload.get("contacts", [])
-    else:
-        contacts = payload
-
-    if not contacts:
-        raise WhatsAppNotReady(
-            "Inbox server returned no WhatsApp contacts.\n"
-            f"{ACCESSIBILITY_INSTRUCTIONS}"
-        )
-
-    return list(contacts)
+    try:
+        data = inbox_get("/whatsapp/contacts")
+    except InboxError as exc:
+        if getattr(exc, "status_code", None) == _STATUS_FORBIDDEN:
+            raise WhatsAppNotReady(_READY_INSTRUCTIONS) from exc
+        raise
+    return _coerce_list(data)
 
 
 def get_thread(contact_id: str, limit: int = 20) -> list:
-    """Return the most recent messages in the thread with `contact_id`.
+    """Return up to ``limit`` messages in the thread with ``contact_id``.
 
-    Args:
-        contact_id: The contact identifier as used by the inbox server
-            (typically a phone number or JID).
-        limit: Maximum number of messages to retrieve. Defaults to 20.
-            Trimming is performed client-side so it works regardless of
-            whether the inbox server supports a `?limit=` query param.
-
-    Returns:
-        A list of message objects, ordered as returned by the inbox
-        server (most-recent-last by convention).
+    The inbox server does the slicing; we forward ``limit`` as a query
+    parameter so the server can honor it. The default of 20 matches
+    the most common "recent messages" use case.
     """
     if not contact_id:
         raise ValueError("contact_id is required")
-    if limit < 0:
-        raise ValueError("limit must be non-negative")
-
-    path = THREAD_PATH_TEMPLATE.format(contact_id=contact_id)
-    payload = _inbox_get_json(path)
-
-    if isinstance(payload, dict):
-        messages = payload.get("messages", [])
-    else:
-        messages = payload
-
-    messages = list(messages)
-    if messages and len(messages) > limit:
-        # Preserve the server's ordering but keep only the trailing
-        # `limit` entries (assumed to be the most recent).
-        messages = messages[-limit:]
-    return messages
+    path = f"/whatsapp/messages/{contact_id}?limit={int(limit)}"
+    return _coerce_list(inbox_get(path))
 
 
 def send(to: str, body: str) -> dict:
     """Send a WhatsApp message via the inbox server.
 
-    Intentionally not gated by `check_ready()`: callers that have already
-    confirmed connectivity (e.g. immediately after fetching contacts)
-    should not pay the latency cost of an extra probe. If WhatsApp is
-    not actually ready, the inbox server will surface that as a 403,
-    which we re-raise as `WhatsAppNotReady` so the user still gets
-    actionable guidance.
+    Readiness is intentionally *not* gated here: a caller that has
+    decided to send a message has already opted in, and the inbox
+    server will surface its own error if WhatsApp isn't usable. We
+    only validate the obvious inputs so we fail fast on programmer
+    error rather than producing a confusing 400 from the server.
     """
     if not to:
-        raise ValueError("'to' is required")
-    if not body:
-        raise ValueError("'body' is required")
-
-    try:
-        return inbox_post(
-            SEND_PATH,
-            json={"source": "whatsapp", "to": to, "body": body},
-        )
-    except InboxError as exc:
-        if _status_from_error(exc) == 403:
-            raise WhatsAppNotReady(
-                "Inbox server denied WhatsApp send (HTTP 403).\n"
-                f"{ACCESSIBILITY_INSTRUCTIONS}",
-                status_code=403,
-            ) from exc
-        raise
+        raise ValueError("to is required")
+    if body is None:
+        raise ValueError("body is required")
+    payload = {"source": "whatsapp", "to": to, "body": body}
+    return inbox_post("/messages/send", json=payload)
