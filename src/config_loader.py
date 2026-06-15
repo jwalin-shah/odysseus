@@ -1,5 +1,6 @@
 import copy
-import os
+import json
+import logging
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -48,28 +49,18 @@ def _coerce_env_value(value: str) -> object:
     return value
 
 
-def _apply_env_overrides(config: dict, prefix: str) -> dict:
-    """Apply environment variable overrides to a config dict.
+def _load_file_config(path: str) -> dict:
+    """Read a JSON config file from disk and return its parsed dict.
 
-    Scans ``os.environ`` for variables beginning with ``prefix``. The
-    suffix after the prefix is interpreted as ``SECTION__KEY`` (split
-    on a double underscore) and the value is coerced via
-    :func:`_coerce_env_value`. The collected overrides are then
-    deep-merged into ``config`` using :func:`deep_merge` and the
-    merged result is returned.
+    Returns an empty dict if the file is missing or invalid, logging the
+    error so the caller can continue with defaults.
     """
-    overrides: dict = {}
-    for env_name, env_value in os.environ.items():
-        if not env_name.startswith(prefix):
-            continue
-        remainder = env_name[len(prefix):]
-        parts = remainder.split("__")
-        if len(parts) != 2:
-            # Only the two-level SECTION__KEY form is supported.
-            continue
-        section, key = parts[0].lower(), parts[1].lower()
-        overrides.setdefault(section, {})[key] = _coerce_env_value(env_value)
-    return deep_merge(config, overrides)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, IsADirectoryError, PermissionError, json.JSONDecodeError, OSError) as e:
+        logging.warning("Failed to load config file %s: %s", path, e)
+        return {}
 
 
 def test_deep_merge_non_dict_replace() -> None:
@@ -80,8 +71,16 @@ def test_deep_merge_non_dict_replace() -> None:
     assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
+def test_deep_merge_empty_inputs() -> None:
+    """Asserts correct behavior when one or both inputs are empty dicts."""
+    assert deep_merge({'x': {'y': 1}}, {}) == {'x': {'y': 1}}
+    assert deep_merge({}, {'x': {'y': 1}}) == {'x': {'y': 1}}
+    assert deep_merge({}, {}) == {}
+
+
 if __name__ == "__main__":
     assert _coerce_env_value('true') is True
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
+    test_deep_merge_empty_inputs()
