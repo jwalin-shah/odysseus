@@ -1,80 +1,87 @@
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
-    """Gate write-class actions behind a user approval step.
+    """Gate an approval-required result.
 
-    Behavior:
-      - If result.needs_approval is False (or payload is empty), return result unchanged.
-      - If result.needs_approval is True and confirmed is False, return result unchanged
-        so the caller can render its approval UI.
-      - If confirmed is True, look up the action function in `src.inbox_tool` by the
-        name stored in result.approval_payload["fn"], invoke it with the remaining
-        payload keys as kwargs, and return a new HarnessResult describing the outcome.
+    - If result.needs_approval is False: pass through unchanged.
+    - If result.needs_approval is True and confirmed is False: pass through unchanged
+      so the caller can render an approval UI.
+    - If confirmed is True: look up the function named in approval_payload["fn"]
+      on src.inbox_tool, invoke it with the appropriate arguments from the payload,
+      and return a new HarnessResult with the execution outcome.
 
-    Expected approval_payload shape:
+    The approval_payload contract:
         {
-            "platform": "imessage",
-            "action":   "send",
-            "to":       "mom",
-            "body":     "...",
-            "fn":       "send_imessage",
+            "platform": "imessage" | "gmail" | "calendar" | ...,
+            "action":   "send" | "create" | "delete" | ...,
+            "fn":       "<function name in src.inbox_tool>",
+            ...function-specific args (e.g. to, body, message_id, title, ...)...
         }
-    The keys "fn", "action", and "platform" are treated as metadata; everything else
-    is forwarded as kwargs to the resolved function.
     """
-    # Nothing pending -> nothing to do.
-    if not result.needs_approval or not result.approval_payload:
+    # No approval gate on this result: pass through.
+    if not result.needs_approval:
         return result
 
-    # Approval required but not yet granted -> hand back to caller for UI.
+    # Approval gate present, but user has not confirmed: return unchanged so the
+    # caller can surface the approval UI.
     if not confirmed:
         return result
 
-    # User confirmed -> resolve and invoke the action function.
-    from src import inbox_tool  # local import to keep module load order safe
-
-    payload = result.approval_payload
+    payload = result.approval_payload or {}
     fn_name = payload.get("fn")
     if not fn_name:
         return HarnessResult(
-            content="Approval payload missing 'fn'; cannot execute pending action.",
-            action_taken="approval_error",
-            needs_approval=False,
-        )
-
-    fn = getattr(inbox_tool, fn_name, None)
-    if fn is None or not callable(fn):
-        return HarnessResult(
-            content=f"Unknown inbox_tool function: {fn_name!r}.",
-            action_taken="approval_error",
-            needs_approval=False,
-        )
-
-    # Forward everything except metadata keys as kwargs.
-    kwargs = {
-        k: v for k, v in payload.items() if k not in ("fn", "action", "platform")
-    }
-
-    try:
-        output = fn(**kwargs)
-    except TypeError as e:
-        return HarnessResult(
-            content=f"Bad arguments for {fn_name}: {e}",
-            action_taken="approval_error",
-            needs_approval=False,
-        )
-    except Exception as e:
-        return HarnessResult(
-            content=f"Error executing {fn_name}: {e}",
+            content="Approval payload is missing 'fn' (function name).",
             action_taken="error",
             needs_approval=False,
         )
 
-    action = payload.get("action", "action")
-    platform = payload.get("platform", "")
-    action_taken = f"{platform}_{action}" if platform else action
-    content = str(output) if output is not None else f"{action_taken} completed."
+    # Resolve the function by name on src.inbox_tool.
+    from src import inbox_tool as _inbox_tool
+
+    fn = getattr(_inbox_tool, fn_name, None)
+    if fn is None or not callable(fn):
+        return HarnessResult(
+            content=f"Function '{fn_name}' not found in src.inbox_tool.",
+            action_taken="error",
+            needs_approval=False,
+        )
+
+    # Pull the routing metadata out of the payload; everything else is forwarded
+    # to the target function as kwargs (with a few named-arg overrides for
+    # the well-known tool entry points so callers don't need to remember exact
+    # keyword names).
+    routing_keys = {"platform", "action", "fn"}
+    extra = {k: v for k, v in payload.items() if k not in routing_keys}
+
+    try:
+        if fn_name == "send_imessage":
+            output = fn(to=payload["to"], body=payload["body"])
+        elif fn_name == "create_calendar_event":
+            output = fn(
+                title=payload.get("title", ""),
+                start=payload.get("start", ""),
+                end=payload.get("end", ""),
+            )
+        elif fn_name == "delete_gmail":
+            output = fn(message_id=payload["message_id"])
+        else:
+            # Generic fallback: forward all non-routing payload keys as kwargs.
+            output = fn(**extra)
+    except KeyError as e:
+        return HarnessResult(
+            content=f"Missing required argument {e!s} for '{fn_name}'.",
+            action_taken="error",
+            needs_approval=False,
+        )
+    except Exception as e:
+        return HarnessResult(
+            content=f"Error executing '{fn_name}': {e}",
+            action_taken="error",
+            needs_approval=False,
+        )
 
     return HarnessResult(
-        content=content,
-        action_taken=action_taken,
+        content=str(output) if output is not None else "Done.",
+        action_taken=f"executed:{fn_name}",
         needs_approval=False,
+        approval_payload=payload,
     )
