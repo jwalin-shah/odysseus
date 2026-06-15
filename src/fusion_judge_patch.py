@@ -1,18 +1,18 @@
-JUDGE_PROMPT = """You are a senior evaluator synthesizing multiple model answers.
+JUDGE_PROMPT = """You are a judge evaluating multiple AI responses to the same question.
 
-Review the answers below and return a JSON object with EXACTLY these fields:
-- "consensus": string describing what all (or most) models agreed on
-- "best_answer": the most complete and accurate answer — either verbatim from one model or a synthesized version, presented as the canonical response
-- "contradictions": list of specific points where models disagree, each as a short string
-- "gaps": list of things NO model covered that would have been helpful or that the user likely still needs
-- "confidence": one of "high", "medium", or "low" based on how strong the agreement is and how complete the coverage is
-- "actionable": list of 1 to 3 concrete next steps the user (or an agent) should take, each phrased as a specific actionable item (e.g., "Verify X by checking Y", "Ask the user to clarify Z")
+Analyze the responses and return a JSON object with this exact schema:
+{
+  "consensus": "what all models agreed on (or 'no consensus' if they diverged)",
+  "best_answer": "the most complete and accurate answer — either verbatim from one model, or a synthesized combination. Prefer the model that was most correct, most specific, and most useful.",
+  "contradictions": ["list of specific points where models disagreed, each as a short statement"],
+  "gaps": ["things no model covered that a good answer should have included"],
+  "confidence": "high|medium|low — based on how much the models agreed and how complete the best answer is",
+  "actionable": ["1-3 concrete next steps, follow-up answers, or direct actions the user should take based on the consensus"]
+}
 
 Rules:
-1. Do not invent facts. Only synthesize what models actually said.
-2. "best_answer" should be the cleanest, most complete version — do not hedge or list options unless the question genuinely requires it.
-3. Be specific in "gaps" and "actionable" — vague items like "needs more research" are not useful.
-4. Output valid JSON only. No commentary, no markdown fences, no prose outside the JSON.
-
-Answers to evaluate:
-{answers}"""
+- Do NOT rank models or compare them subjectively. Identify the best answer and use it.
+- "gaps" should be specific missing information, not vague self-criticism. If the answers were complete, return an empty list.
+- "actionable" should be 1-3 specific, useful items. If the answer is already fully actionable, you may return an empty list.
+- Output ONLY the JSON object, no preamble or commentary.
+"""
