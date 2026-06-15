@@ -1,8 +1,4 @@
-"""Tests for src.intent_router.classify().
-
-Parametrized checks across the main intent categories plus a
-focused test for the WhatsApp contact-extraction patch path.
-"""
+"""Tests for src.intent_router.classify()."""
 import pytest
 
 from src.intent_router import classify
@@ -36,6 +32,11 @@ from src.intent_router import classify
             id="code-fix-bug",
         ),
         pytest.param(
+            "what did Sarah say on WhatsApp",
+            {"platform": "whatsapp", "contact": "Sarah"},
+            id="whatsapp-read-sarah",
+        ),
+        pytest.param(
             "show my LinkedIn DMs",
             {"platform": "linkedin", "action": "read"},
             id="linkedin-read-dms",
@@ -43,35 +44,12 @@ from src.intent_router import classify
     ],
 )
 def test_classify(text, expected):
+    """classify() should extract the correct platform/action/contact fields."""
     result = classify(text)
-    for key, value in expected.items():
-        if isinstance(value, dict):
-            assert key in result, f"Missing key {key!r} in result {result!r}"
-            for sub_key, sub_value in value.items():
-                assert result[key].get(sub_key) == sub_value, (
-                    f"For input {text!r}, expected "
-                    f"{key}.{sub_key}={sub_value!r}, "
-                    f"got {result[key].get(sub_key)!r}"
-                )
-        else:
-            assert result.get(key) == value, (
-                f"For input {text!r}, expected {key}={value!r}, "
-                f"got {result.get(key)!r}"
-            )
 
-
-def test_classify_whatsapp_with_contact_patch(monkeypatch):
-    """Once the contact resolver is patched, the WhatsApp intent
-    should surface the contact name alongside the platform."""
-    from src import intent_router
-
-    def fake_resolve_contact(text):
-        return "Sarah" if "Sarah" in text else None
-
-    monkeypatch.setattr(
-        intent_router, "resolve_contact", fake_resolve_contact
-    )
-
-    result = classify("what did Sarah say on WhatsApp")
-    assert result["platform"] == "whatsapp"
-    assert result.get("contact") == "Sarah"
+    for key, expected_value in expected.items():
+        actual_value = result[key]
+        assert actual_value == expected_value, (
+            f"For input {text!r}: "
+            f"expected {key}={expected_value!r}, got {actual_value!r}"
+        )
