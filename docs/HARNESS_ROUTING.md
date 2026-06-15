@@ -1,5 +1,5 @@
 # Odysseus Request Routing
 
-How user input flows from text → classified intent → executed action.
+How a user message travels from text to executed action.
 
-## Flow Diagram
+## Pipeline Overview
