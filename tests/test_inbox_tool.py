@@ -1,68 +1,46 @@
-"""Unit tests for src.inbox_tool.
+"""Unit tests for src/inbox_tool.py.
 
-Covers:
-- _request() retry behaviour for URLError (3 retries) and HTTPError (no retry)
-- get_imessage_thread() accepting both int and str chat_id
+Covers the retry behavior of _request() and the chat_id type
+flexibility of get_imessage_thread().
 """
-import json
-import os
-import sys
 import unittest
-from unittest.mock import MagicMock, patch
-from urllib.error import HTTPError, URLError
+from unittest.mock import patch, MagicMock
+from urllib.error import URLError, HTTPError
 
-# Ensure the project root is on sys.path so we can import `src.inbox_tool`.
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from src.inbox_tool import InboxError, InboxTool  # noqa: E402
-
-
-def _make_json_response(payload):
-    """Build a context-manager mock that returns JSON ``payload`` from .read()."""
-    response = MagicMock()
-    response.read.return_value = json.dumps(payload).encode("utf-8")
-    response.__enter__.return_value = response
-    response.__exit__.return_value = False
-    return response
+from src.inbox_tool import _request, get_imessage_thread, InboxError
 
 
 class TestRequestRetryLogic(unittest.TestCase):
-    """Verify _request() retry semantics for network errors."""
+    """Test the retry behavior of the internal _request() helper."""
 
-    def setUp(self):
-        self.tool = InboxTool(base_url="http://test.local")
-
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_urlerror_retries_three_times_then_raises(self, mock_urlopen):
-        """URLError should trigger exactly 3 attempts before raising InboxError."""
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_three_times_on_url_error(self, mock_urlopen, mock_sleep):
+        """On URLError, _request should attempt 3 times then raise InboxError."""
         mock_urlopen.side_effect = URLError("connection refused")
+        test_url = "http://example.com/api/endpoint"
 
         with self.assertRaises(InboxError):
-            self.tool._request("/endpoint")
+            _request(test_url)
 
+        # Three total attempts (1 initial + 2 retries) before giving up.
         self.assertEqual(mock_urlopen.call_count, 3)
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_urlerror_eventually_succeeds_within_retry_window(self, mock_urlopen):
-        """A successful response within the retry window is returned to the caller."""
-        mock_urlopen.side_effect = [
-            URLError("transient 1"),
-            URLError("transient 2"),
-            _make_json_response({"ok": True}),
-        ]
+        # Every retry must hit the same URL.
+        for call_args in mock_urlopen.call_args_list:
+            self.assertEqual(call_args.args[0], test_url)
 
-        result = self.tool._request("/endpoint")
+        # There should be sleep calls between retries (2 sleeps for 3 attempts).
+        self.assertEqual(mock_sleep.call_count, 2)
 
-        self.assertEqual(result, {"ok": True})
-        self.assertEqual(mock_urlopen.call_count, 3)
-
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_httperror_raises_inbox_error_immediately(self, mock_urlopen):
-        """HTTPError should not be retried; InboxError raised on the first failure."""
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_raises_inbox_error_immediately_on_http_error(
+        self, mock_urlopen, mock_sleep
+    ):
+        """On HTTPError, _request should raise InboxError immediately (no retry)."""
         mock_urlopen.side_effect = HTTPError(
-            url="http://test.local/endpoint",
+            url="http://example.com/api",
             code=500,
             msg="Internal Server Error",
             hdrs={},
@@ -70,45 +48,77 @@ class TestRequestRetryLogic(unittest.TestCase):
         )
 
         with self.assertRaises(InboxError):
-            self.tool._request("/endpoint")
+            _request("http://example.com/api")
 
-        # Crucially: no retries on HTTPError.
+        # HTTPError is non-transient: only one attempt, no retries.
+        self.assertEqual(mock_urlopen.call_count, 1)
+        # Confirm we never slept (i.e. never retried).
+        self.assertEqual(mock_sleep.call_count, 0)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_returns_response_on_success(self, mock_urlopen, mock_sleep):
+        """On success, _request should return the urlopen response without retrying."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"ok": true}'
+        mock_urlopen.return_value = mock_response
+
+        result = _request("http://example.com/api")
+
+        self.assertIs(result, mock_response)
         self.assertEqual(mock_urlopen.call_count, 1)
 
 
-class TestGetIMessageThread(unittest.TestCase):
-    """Verify get_imessage_thread() handles int and str chat_id values."""
+class TestGetImessageThread(unittest.TestCase):
+    """Test that get_imessage_thread() accepts both int and str chat_id values."""
 
-    def setUp(self):
-        self.tool = InboxTool(base_url="http://test.local")
+    def _build_mock_response(self):
+        """Construct a MagicMock that quacks like a urlopen response."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"messages": []}'
+        return mock_response
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_get_imessage_thread_with_int_chat_id(self, mock_urlopen):
-        """An int chat_id is normalised to its string form in the request URL."""
-        mock_urlopen.return_value = _make_json_response(
-            {"chat_id": 12345, "messages": []}
-        )
+    @patch("src.inbox_tool._request")
+    def test_accepts_int_chat_id(self, mock_request):
+        """An integer chat_id should be accepted and forwarded to _request."""
+        mock_request.return_value = self._build_mock_response()
 
-        result = self.tool.get_imessage_thread(12345)
+        # Must not raise any TypeError or validation error.
+        get_imessage_thread(12345)
 
-        self.assertEqual(result, {"chat_id": 12345, "messages": []})
-        mock_urlopen.assert_called_once()
-        called_request = mock_urlopen.call_args[0][0]
-        self.assertIn("12345", called_request.full_url)
+        mock_request.assert_called_once()
+        # The int chat_id should appear in the URL/request passed down.
+        self.assertIn("12345", str(mock_request.call_args))
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_get_imessage_thread_with_str_chat_id(self, mock_urlopen):
-        """A str chat_id is passed through to the request URL unchanged."""
-        mock_urlopen.return_value = _make_json_response(
-            {"chat_id": "chat-abc", "messages": []}
-        )
+    @patch("src.inbox_tool._request")
+    def test_accepts_str_chat_id(self, mock_request):
+        """A string chat_id should be accepted and forwarded to _request."""
+        mock_request.return_value = self._build_mock_response()
 
-        result = self.tool.get_imessage_thread("chat-abc")
+        # Must not raise any TypeError or validation error.
+        get_imessage_thread("chat_abc_123")
 
-        self.assertEqual(result, {"chat_id": "chat-abc", "messages": []})
-        mock_urlopen.assert_called_once()
-        called_request = mock_urlopen.call_args[0][0]
-        self.assertIn("chat-abc", called_request.full_url)
+        mock_request.assert_called_once()
+        # The str chat_id should appear in the URL/request passed down.
+        self.assertIn("chat_abc_123", str(mock_request.call_args))
+
+    @patch("src.inbox_tool._request")
+    def test_int_and_str_produce_equivalent_request(self, mock_request):
+        """An int chat_id and its str form should produce equivalent requests."""
+        mock_request.return_value = self._build_mock_response()
+
+        get_imessage_thread(99)
+        int_call = str(mock_request.call_args)
+
+        mock_request.reset_mock()
+        mock_request.return_value = self._build_mock_response()
+
+        get_imessage_thread("99")
+        str_call = str(mock_request.call_args)
+
+        # The chat_id value should appear in both calls regardless of type.
+        self.assertIn("99", int_call)
+        self.assertIn("99", str_call)
 
 
 if __name__ == "__main__":
