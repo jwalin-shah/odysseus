@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import re
 
@@ -11,6 +11,7 @@ class IntentResult:
     needs_approval: bool
     confidence: float
     inbox_route: str    # REST path e.g. "/imessage/contacts"
+    time_info: Optional[dict] = field(default=None)
 
 
 _PLATFORM_PATTERNS = [
@@ -60,10 +61,25 @@ _ACTION_ROUTES = {
     ("linkedin", "send"):   "/linkedin/send",
 }
 
+_PLATFORM_WORDS = {"imessage", "whatsapp", "gmail", "email", "calendar", "linkedin", "text", "sms"}
+_STOP_WORDS = {"about", "for", "re", "regarding", "on", "and", "but", "with", "to", "in"}
+
+# Stop contact capture at prepositions/conjunctions that start a new clause
 _CONTACT_RE = re.compile(
-    r"(?:to|from|with|for|reply to|send to|ask)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+    r"(?:to|from|with|for|reply to|send to|forward to|ask)\s+"
+    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
     re.IGNORECASE,
 )
+
+_TIME_DAYS = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|yesterday)"
+_TIME_HMS = r"(?:(\d{1,2})(?::(\d{2}))?\s*([ap]m)?)"
+_TIME_ISO = r"(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?)"
+_TIME_RELATIVE = r"(next\s+week|this\s+week|this\s+morning|this\s+afternoon|this\s+evening|tonight)"
+
+_DAY_RE = re.compile(_TIME_DAYS, re.IGNORECASE)
+_HMS_RE = re.compile(_TIME_HMS, re.IGNORECASE)
+_ISO_RE = re.compile(_TIME_ISO)
+_REL_RE = re.compile(_TIME_RELATIVE, re.IGNORECASE)
 
 
 def _match_platform(text: str) -> tuple[str, float]:
@@ -84,9 +100,57 @@ def _match_action(text: str) -> tuple[str, float]:
 
 def _extract_contact(text: str) -> Optional[str]:
     m = _CONTACT_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return None
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    # Drop trailing words that are prepositions or platform names
+    words = raw.split()
+    clean = []
+    for w in words:
+        if w.lower() in _STOP_WORDS or w.lower() in _PLATFORM_WORDS:
+            break
+        # Drop possessives at word boundary ("mom's" → "mom")
+        clean.append(w.rstrip("'s"))
+    return " ".join(clean) if clean else None
+
+
+def _extract_time(text: str) -> Optional[dict]:
+    iso = _ISO_RE.search(text)
+    if iso:
+        raw = iso.group(1).replace(" ", "T")
+        if "T" not in raw:
+            raw += "T00:00:00"
+        return {"datetime_iso": raw}
+
+    rel = _REL_RE.search(text)
+    day = _DAY_RE.search(text)
+    hms = _HMS_RE.search(text)
+
+    if rel and not day:
+        return {"relative": rel.group(0).lower()}
+
+    if not day and not hms:
+        return None
+
+    result: dict = {"relative": True}
+    if day:
+        result["day"] = day.group(0).capitalize()
+    if hms:
+        h = int(hms.group(1))
+        mn = int(hms.group(2) or 0)
+        ampm = (hms.group(3) or "").lower()
+        if ampm == "pm" and h < 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        result["time"] = f"{h:02d}:{mn:02d}"
+    elif day:
+        word = day.group(0).lower()
+        if "morning" in text.lower():
+            result["time"] = "09:00"
+        elif "afternoon" in text.lower() or "evening" in text.lower():
+            result["time"] = "15:00"
+    return result
 
 
 def _route(platform: str, action: str, contact: Optional[str]) -> str:
@@ -100,7 +164,9 @@ def classify(text: str) -> IntentResult:
     platform, p_conf = _match_platform(text)
     action, a_conf = _match_action(text)
     contact = _extract_contact(text)
-    confidence = (p_conf + a_conf) / 2
+    time_info = _extract_time(text)
+    # Both platform and action strong → high confidence
+    confidence = 0.95 if (p_conf >= 0.85 and a_conf >= 0.85) else (p_conf + a_conf) / 2
     needs_approval = action in _WRITE_ACTIONS
     route = _route(platform, action, contact)
     return IntentResult(
@@ -110,4 +176,5 @@ def classify(text: str) -> IntentResult:
         needs_approval=needs_approval,
         confidence=confidence,
         inbox_route=route,
+        time_info=time_info,
     )
