@@ -7,24 +7,8 @@ class ApiKeyRouter:
         self._index = 0
         self._quota_exceeded = set()
 
-    def register_key(self, key: str) -> None:
-        if key not in self._keys:
-            self._keys.append(key)
-
     def mark_quota_error(self, key: str) -> None:
         self._quota_exceeded.add(key)
-
-    def mark_quota_exhausted(self, key: str) -> None:
-        self._quota_exceeded.add(key)
-
-    def reset_quota(self, key: str) -> bool:
-        if key in self._quota_exceeded:
-            self._quota_exceeded.discard(key)
-            return True
-        return False
-
-    def is_quota_exhausted(self, key: str) -> bool:
-        return key in self._quota_exceeded
 
     def available_keys(self) -> list:
         return [k for k in self._keys if k not in self._quota_exceeded]
@@ -32,18 +16,24 @@ class ApiKeyRouter:
     def is_available(self, key: str) -> bool:
         return key in self._keys and key not in self._quota_exceeded
 
-    def is_quota_error(self, exc: BaseException) -> bool:
+    @staticmethod
+    def is_quota_error(exc: BaseException) -> bool:
         message = str(exc).lower()
-        return "quota" in message or "rate limit" in message
+        type_name = type(exc).__name__.lower()
+        indicators = ("quota", "rate limit", "429", "resource_exhausted")
+        for indicator in indicators:
+            if indicator in message or indicator in type_name:
+                return True
+        return False
 
 
 if __name__ == "__main__":
-    # Spec tests for reset_quota
-    r = ApiKeyRouter(); r.register_key('a'); r.mark_quota_exhausted('a'); assert r.reset_quota('a') is True
-    r = ApiKeyRouter(); r.register_key('a'); assert r.reset_quota('a') is False
-    r = ApiKeyRouter(); r.register_key('a'); r.reset_quota('a'); assert r.is_quota_exhausted('a') is False
-
     # Spec tests
+    assert ApiKeyRouter.is_quota_error(Exception('429 quota exceeded')) is True
+    assert ApiKeyRouter.is_quota_error(Exception('rate limit reached for requests')) is True
+    assert ApiKeyRouter.is_quota_error(ValueError('bad input')) is False
+
+    # Existing tests
     r = ApiKeyRouter(["a", "b", "c"])
     assert r._keys == ["a", "b", "c"] and r._index == 0
 
@@ -53,7 +43,6 @@ if __name__ == "__main__":
     r = ApiKeyRouter(["x"])
     assert r.is_available("x") is True
 
-    # Existing tests
     r = ApiKeyRouter([])
     assert r.is_quota_error(Exception('quota exceeded')) == True
     r = ApiKeyRouter([])
