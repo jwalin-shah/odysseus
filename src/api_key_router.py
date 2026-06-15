@@ -1,19 +1,23 @@
-import time
+from __future__ import annotations
 
 class ApiKeyRouter:
-    def __init__(self, keys):
-        self.keys = list(keys)
-        self._cooldown_until = {}
-        self._cooldown_duration = 60.0
+    def __init__(self, keys: list[str]):
+        self.keys = keys
+        self.index = 0
+        self.cooldown = set()
 
-    def report_quota_error(self, key):
-        if key in self.keys:
-            self._cooldown_until[key] = time.time() + self._cooldown_duration
+    def report_quota_error(self, key: str):
+        self.cooldown.add(key)
 
-    def available_count(self) -> int:
-        now = time.time()
-        available = 0
-        for key in self.keys:
-            if key not in self._cooldown_until or self._cooldown_until[key] <= now:
-                available += 1
-        return available
+    def get_key(self) -> str | None:
+        if not self.keys:
+            return None
+        n = len(self.keys)
+        for _ in range(n):
+            key = self.keys[self.index]
+            if key not in self.cooldown:
+                self.index = (self.index + 1) % n
+                return key
+            else:
+                self.index = (self.index + 1) % n
+        return None
