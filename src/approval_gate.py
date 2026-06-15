@@ -1,34 +1,53 @@
-"""Approval gate for CLI confirmations."""
+"""Approval gate for classifying harness tool actions as read or write."""
 
 
-def parse_cli_response(raw: str) -> str:
-    """Parses a raw CLI confirmation response into one of 'approve', 'deny', or 'abort'.
+_WRITE_INDICATORS = (
+    "write",
+    "send",
+    "create",
+    "update",
+    "delete",
+    "modify",
+    "post",
+    "put",
+    "patch",
+    "remove",
+    "append",
+    "insert",
+    "set",
+    "save",
+    "upload",
+    "publish",
+)
 
-    Recognized affirmative responses (case-insensitive, whitespace-trimmed):
-        - 'y', 'yes'         -> 'approve'
-        - 'n', 'no'          -> 'deny'
-        - 'q', 'quit', 'abort' -> 'abort'
+_READ_INDICATORS = (
+    "read",
+    "get",
+    "fetch",
+    "list",
+    "view",
+    "query",
+    "search",
+    "find",
+    "describe",
+    "inspect",
+)
 
-    Args:
-        raw: The raw input string from the CLI.
 
-    Returns:
-        One of the canonical strings: 'approve', 'deny', or 'abort'.
+def classify_write_action(tool_name: str) -> bool:
+    """Return True if the named harness tool performs a state-mutating write action.
 
-    Raises:
-        TypeError: If ``raw`` is not a string.
-        ValueError: If ``raw`` is not a recognized confirmation response.
+    Classification is performed by inspecting the tool name for action-oriented
+    keywords. A tool is considered a write action when it contains a write
+    indicator and is not exclusively a read indicator. Unknown tool names default
+    to a non-write (safer) classification.
     """
-    if not isinstance(raw, str):
-        raise TypeError(f"Expected str, got {type(raw).__name__}")
+    lowered = tool_name.lower()
 
-    cleaned = raw.strip().lower()
+    has_write = any(token in lowered for token in _WRITE_INDICATORS)
+    has_read = any(token in lowered for token in _READ_INDICATORS)
 
-    if cleaned in ("y", "yes"):
-        return "approve"
-    if cleaned in ("n", "no"):
-        return "deny"
-    if cleaned in ("q", "quit", "abort"):
-        return "abort"
+    if has_read and not has_write:
+        return False
 
-    raise ValueError(f"Invalid CLI response: {raw!r}")
+    return has_write
