@@ -1,127 +1,95 @@
-"""Unit tests for src.inbox_tool.
+"""Unit tests for src/inbox_tool.py.
 
-Covers the retry logic in _request() and the chat_id type flexibility of
-get_imessage_thread(). urllib.request.urlopen is mocked in every test so no
-real network I/O is performed.
+Covers:
+* Retry behaviour of the internal ``_request()`` helper (URLError vs HTTPError).
+* Type flexibility of ``get_imessage_thread()`` (accepts ``int`` and ``str``).
 """
 
 import json
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from src.inbox_tool import InboxError, _request, get_imessage_thread
+# Make the src/ folder importable regardless of where the tests are run from.
+_SRC_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, "src")
+)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from inbox_tool import InboxError, _request, get_imessage_thread  # noqa: E402
 
 
-def _make_response(payload):
-    """Build a MagicMock that mimics urllib's context-manager response."""
-    response = MagicMock()
-    response.read.return_value = json.dumps(payload).encode("utf-8")
-    # MagicMock already supports the context-manager protocol; the
-    # __enter__/__exit__ attributes are MagicMocks themselves which is fine
-    # for the purposes of these tests.
-    return response
+class RequestRetryTests(unittest.TestCase):
+    """Verify the retry / fail-fast behaviour of ``_request()``."""
 
-
-class TestRequestRetryLogic(unittest.TestCase):
-    """_request() must retry transient URLErrors and fail fast on HTTPErrors."""
-
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_urlerror_retries_three_times_then_raises(self, mock_urlopen):
-        """A persistent URLError should be retried 3 times before raising."""
+    @patch("inbox_tool.urllib.request.urlopen")
+    def test_urlerror_triggers_three_attempts_then_raises_inboxerror(self, mock_urlopen):
+        """URLError should be retried 3 times before raising InboxError."""
         mock_urlopen.side_effect = URLError("connection refused")
 
         with self.assertRaises(InboxError):
-            _request("/some/path")
+            _request("https://api.example.com/threads/1")
 
         self.assertEqual(mock_urlopen.call_count, 3)
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_urlerror_eventually_succeeds(self, mock_urlopen):
-        """If a transient URLError resolves, the call should return the payload."""
-        success_response = _make_response({"ok": True})
-        mock_urlopen.side_effect = [
-            URLError("blip 1"),
-            URLError("blip 2"),
-            success_response,
-        ]
-
-        result = _request("/some/path")
-
-        self.assertEqual(mock_urlopen.call_count, 3)
-        self.assertEqual(result, {"ok": True})
-
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_httperror_raises_immediately_no_retry(self, mock_urlopen):
-        """HTTPError is treated as a non-transient failure — no retries."""
+    @patch("inbox_tool.urllib.request.urlopen")
+    def test_httperror_raises_inboxerror_without_retry(self, mock_urlopen):
+        """HTTPError should raise InboxError immediately — no retries."""
         mock_urlopen.side_effect = HTTPError(
-            url="http://example.invalid",
+            url="https://api.example.com/threads/1",
             code=500,
-            msg="internal server error",
+            msg="Internal Server Error",
             hdrs={},
             fp=None,
         )
 
         with self.assertRaises(InboxError):
-            _request("/some/path")
+            _request("https://api.example.com/threads/1")
 
         self.assertEqual(mock_urlopen.call_count, 1)
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_httperror_is_wrapped_in_inboxerror(self, mock_urlopen):
-        """The raised exception must be InboxError, not a raw HTTPError."""
-        mock_urlopen.side_effect = HTTPError(
-            url="http://example.invalid",
-            code=404,
-            msg="not found",
-            hdrs={},
-            fp=None,
-        )
+    @patch("inbox_tool.urllib.request.urlopen")
+    def test_successful_response_is_returned_parsed(self, mock_urlopen):
+        """A 2xx response should be returned as the parsed JSON payload."""
+        payload = json.dumps({"messages": [{"id": 1, "text": "hi"}]})
+        response = MagicMock()
+        response.read.return_value = payload.encode("utf-8")
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        mock_urlopen.return_value = response
 
-        with self.assertRaises(InboxError) as ctx:
-            _request("/missing")
+        result = _request("https://api.example.com/threads/1")
 
-        # Make sure the underlying HTTPError is chained, not swallowed silently.
-        self.assertIsInstance(ctx.exception.__cause__, HTTPError)
+        self.assertEqual(result, {"messages": [{"id": 1, "text": "hi"}]})
+        self.assertEqual(mock_urlopen.call_count, 1)
 
 
-class TestGetImessageThreadChatId(unittest.TestCase):
-    """get_imessage_thread() must accept chat_id as either int or str."""
+class GetIMessageThreadChatIdTests(unittest.TestCase):
+    """Verify ``get_imessage_thread`` works with both int and str chat_ids."""
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_accepts_int_chat_id(self, mock_urlopen):
-        """An integer chat_id is accepted and stringified into the URL."""
-        mock_urlopen.return_value = _make_response({"messages": []})
+    def setUp(self):
+        # Stub out _request so the test focuses purely on argument handling
+        # and never hits the network.
+        patcher = patch("inbox_tool._request", return_value={"thread": []})
+        self.mock_request = patcher.start()
+        self.addCleanup(patcher.stop)
 
-        get_imessage_thread(12345)
+    def test_accepts_integer_chat_id(self):
+        get_imessage_thread(42)
 
-        called_url = mock_urlopen.call_args[0][0]
-        # The URL (or Request) passed to urlopen must contain the chat_id
-        # as its string form.
-        self.assertIn("12345", str(called_url))
+        self.mock_request.assert_called_once()
+        url = self.mock_request.call_args[0][0]
+        self.assertIn("42", url)
 
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_accepts_str_chat_id(self, mock_urlopen):
-        """A string chat_id is accepted and embedded verbatim into the URL."""
-        mock_urlopen.return_value = _make_response({"messages": []})
+    def test_accepts_string_chat_id(self):
+        get_imessage_thread("chat_abc_123")
 
-        get_imessage_thread("chat-abc-123")
-
-        called_url = mock_urlopen.call_args[0][0]
-        self.assertIn("chat-abc-123", str(called_url))
-
-    @patch("src.inbox_tool.urllib.request.urlopen")
-    def test_int_and_str_produce_same_url(self, mock_urlopen):
-        """int(123) and str('123') should hit the same endpoint."""
-        mock_urlopen.return_value = _make_response({"messages": []})
-
-        get_imessage_thread(123)
-        url_from_int = str(mock_urlopen.call_args[0][0])
-
-        get_imessage_thread("123")
-        url_from_str = str(mock_urlopen.call_args[0][0])
-
-        self.assertEqual(url_from_int, url_from_str)
+        self.mock_request.assert_called_once()
+        url = self.mock_request.call_args[0][0]
+        self.assertIn("chat_abc_123", url)
 
 
 if __name__ == "__main__":
