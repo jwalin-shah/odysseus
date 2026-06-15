@@ -1,4 +1,6 @@
 import copy
+import json
+import logging
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -47,28 +49,18 @@ def _coerce_env_value(value: str) -> object:
     return value
 
 
-def _default_config() -> dict:
-    """Return the documented default configuration.
+def _load_file_config(path: str) -> dict:
+    """Read a JSON config file from disk and return its parsed dict.
 
-    The defaults dict exposes three top-level sections used across the app:
-    - ``server``: network binding settings (host, port)
-    - ``llm``: language model provider settings (provider, model)
-    - ``logging``: diagnostic output settings (level, format)
+    Returns an empty dict if the file is missing or invalid, logging the
+    error so the caller can continue with defaults.
     """
-    return {
-        "server": {
-            "host": "127.0.0.1",
-            "port": 8000,
-        },
-        "llm": {
-            "provider": "openai",
-            "model": "gpt-4o-mini",
-        },
-        "logging": {
-            "level": "INFO",
-            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        },
-    }
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, IsADirectoryError, PermissionError, json.JSONDecodeError, OSError) as e:
+        logging.warning("Failed to load config file %s: %s", path, e)
+        return {}
 
 
 def test_deep_merge_non_dict_replace() -> None:
@@ -79,16 +71,8 @@ def test_deep_merge_non_dict_replace() -> None:
     assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
-def test_default_config_has_expected_keys() -> None:
-    """Verify the defaults dict exposes server, llm, and logging sections."""
-    assert "server" in _default_config()
-    assert "llm" in _default_config()
-    assert "logging" in _default_config()
-
-
 if __name__ == "__main__":
     assert _coerce_env_value('true') is True
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
-    test_default_config_has_expected_keys()
