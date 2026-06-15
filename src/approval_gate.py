@@ -1,12 +1,13 @@
-def format_approval_prompt(summary: str, details: dict) -> str:
-    lines = []
-    lines.append(f"Proposed action: {summary}")
+"""Approval gate logic for action policies."""
 
-    if details:
-        lines.append("Details:")
-        for key, value in details.items():
-            lines.append(f"  {key}: {value}")
 
-    lines.append("Do you approve? (y/n)")
+def evaluate_approval_required(action_kind: str, policy: dict) -> bool:
+    """Return True if the given action kind requires explicit user approval.
 
-    return "\n".join(lines)
+    The policy dict is expected to contain boolean flags named
+    ``require_approval_<action_kind>s`` (e.g. ``require_approval_writes``).
+    If the corresponding flag is missing, the action is treated as not
+    requiring approval.
+    """
+    flag_name = f"require_approval_{action_kind}s"
+    return bool(policy.get(flag_name, False))
