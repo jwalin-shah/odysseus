@@ -1,5 +1,5 @@
 # Odysseus Request Routing
 
-How a user message travels from text to executed action.
+How a user's text becomes an executed action across platforms (Telegram, Discord, code, etc).
 
 ## Pipeline Overview
