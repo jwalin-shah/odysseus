@@ -27,6 +27,17 @@ _PROMPT_TEMPLATES = {
         "Old text:\n{old_text}\n\n"
         "New text:\n{new_text}\n"
     ),
+    "CRITIC": (
+        "You are a critic. Your role is to critique the risks and weaknesses of a proposed approach for the given task.\n\n"
+        "{task_desc}\n\n"
+        "Please provide a thorough critique covering:\n"
+        "- Potential risks, failure modes, and edge cases that may not be handled.\n"
+        "- Weaknesses or gaps in the proposed approach.\n"
+        "- Assumptions that may not hold and the consequences if they break.\n"
+        "- Trade-offs, costs, complexity, and potential side effects.\n"
+        "- Alternative or complementary approaches worth considering.\n\n"
+        "Provide your critique as a clear, structured list of findings with actionable suggestions for improvement."
+    ),
 }
 
 
@@ -45,6 +56,18 @@ def get_prompt_template(name: str) -> str:
         KeyError: If ``name`` does not match any registered template.
     """
     return _PROMPT_TEMPLATES[name]
+
+
+def _format_task_block(task_desc: str) -> str:
+    """Format a task description as a labeled block for inclusion in a prompt.
+
+    Args:
+        task_desc: The task description to format.
+
+    Returns:
+        The formatted task block string.
+    """
+    return f"Task Description:\n{task_desc}"
 
 
 def build_review_prompt(file_path: str, content: str, review_focus: str, severity_filter: str = 'all') -> str:
@@ -109,3 +132,17 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
     if instruction:
         prompt += f"\n\nAdditional instruction:\n{instruction}"
     return prompt
+
+
+def build_critic_prompt(task_desc: str) -> str:
+    """Build a critic-role gate prompt that critiques risks and weaknesses of a proposed approach.
+
+    Args:
+        task_desc: Description of the task whose proposed approach should be
+            critiqued.
+
+    Returns:
+        The formatted critic prompt string.
+    """
+    template = get_prompt_template("CRITIC")
+    return template.format(task_desc=_format_task_block(task_desc))
