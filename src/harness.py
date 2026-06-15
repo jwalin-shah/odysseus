@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import os
 from typing import Callable
 
 from src.intent_router import classify
@@ -20,7 +21,7 @@ class HarnessResult:
 
 
 # Platform -> reader function dispatch for the "read" intent.
-_PLATFORM_READERS: dict[str, Callable] = {
+_PLATFORM_READERS: dict[str, Callable[[], object]] = {
     "imessage": get_imessage_contacts,
     "gmail": get_gmail_unread,
     "calendar": get_calendar_upcoming,
@@ -76,8 +77,11 @@ def _handle_calendar_create(user_text: str, context: dict) -> HarnessResult:
 
 
 def _handle_code(user_text: str, context: dict) -> HarnessResult:
+    model = (context or {}).get("model") or os.environ.get(
+        "PI_MODEL", "tokenrouter/MiniMax-M3"
+    )
     try:
-        result = pi_call("tokenrouter/MiniMax-M3", user_text)
+        result = pi_call(model, user_text)
     except Exception as exc:  # noqa: BLE001 - surface error to caller
         return HarnessResult(
             content=f"Code generation failed: {exc}",
@@ -98,15 +102,18 @@ def _handle_general(user_text: str, context: dict) -> HarnessResult:
 
 _HANDLERS: dict[str, Callable[[str, dict], HarnessResult]] = {
     "read": _handle_read,
+    "send": lambda u, c: _handle_send_or_reply(u, c, "send"),
+    "reply": lambda u, c: _handle_send_or_reply(u, c, "reply"),
     "calendar_create": _handle_calendar_create,
     "code": _handle_code,
     "general": _handle_general,
 }
 
 
-def run(user_text: str, context: dict = None) -> HarnessResult:
-    intent = classify(user_text)
-    if intent in ("send", "reply"):
-        return _handle_send_or_reply(user_text, context, intent)
-    handler = _HANDLERS.get(intent, _handle_general)
-    return handler(user_text, context or {})
+def run_harness(user_text: str, context: dict | None = None) -> HarnessResult:
+    ctx = context or {}
+    intent = classify(user_text, ctx)
+    handler = _HANDLERS.get(intent)
+    if handler is None:
+        return _handle_general(user_text, ctx)
+    return handler(user_text, ctx)
