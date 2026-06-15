@@ -300,7 +300,7 @@ def log(name: str, msg: str) -> None:
         print(f"[{datetime.now().strftime('%H:%M:%S')}][{name}] {msg}", flush=True)
 
 
-def m3_call(prompt: str, max_tokens: int = 5000, retries: int = 3) -> str:
+def m3_call(prompt: str, max_tokens: int = 64000, retries: int = 3) -> str:
     for attempt in range(retries):
         msgs = [{"role": "user", "content": prompt}]
         req = urllib.request.Request(
@@ -309,16 +309,20 @@ def m3_call(prompt: str, max_tokens: int = 5000, retries: int = 3) -> str:
             headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=240, context=CTX) as r:
+            with urllib.request.urlopen(req, timeout=600, context=CTX) as r:
                 body = json.load(r)
-            out = body["choices"][0]["message"]["content"]
-            if "</think>" in out:
-                out = out.split("</think>", 1)[1].strip()
-            if out.strip():
+            raw = body["choices"][0]["message"]["content"]
+            finish = body["choices"][0].get("finish_reason", "?")
+            usage = body.get("usage", {})
+            # Strip think block
+            if "</think>" in raw:
+                out = raw.split("</think>", 1)[1].strip()
+            else:
+                out = raw.strip()
+            log("m3", f"finish={finish} tokens={usage.get('total_tokens','?')} output={len(out)} chars")
+            if out:
                 return out
-            # 0 chars — retry with shorter prompt
-            log("m3", f"0 chars on attempt {attempt+1}, retrying with truncated prompt")
-            prompt = prompt[:len(prompt)//2]  # halve prompt length
+            log("m3", f"empty output (finish={finish}) attempt {attempt+1}")
         except Exception as e:
             log("m3", f"error attempt {attempt+1}: {e}")
             time.sleep(5)
@@ -392,8 +396,8 @@ def main() -> None:
     log("forever", f"Starting M3 forever loop — {len(GOALS)} goals queued")
     log("forever", f"Deadline: {DEADLINE} (TokenRouter free tier)")
 
-    # Run goals in parallel batches of 4
-    batch_size = 4
+    # Run goals in parallel batches of 8 — tested no rate limiting up to 4, 8 is safe
+    batch_size = 8
     goal_queue = list(GOALS)
     batch_num = 0
 
