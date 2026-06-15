@@ -1,74 +1,138 @@
-"""Tests for src.intent_router.classify().
+"""Parametrized pytest tests for src.intent_router.classify().
 
-Verifies that natural-language commands are correctly classified into
-structured intents (platform, action, contact, time_info, etc.).
+These tests assert the *contract* of classify(): given a natural-language
+utterance, it should return a structured intent with at minimum `platform`
+and (where applicable) `action`, `contact`, and `time_info` fields.
+
+`classify()` is treated as returning either a dict, a dataclass-like
+object, or a namedtuple. The `_get` helper normalises nested access so
+the assertions work regardless of the concrete return type.
 """
+
+from __future__ import annotations
+
 import pytest
 
 from src.intent_router import classify
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get(obj, *path):
+    """Resolve a dotted path on either a dict or an attribute-bearing object.
+
+    Returns None if any segment is missing. This lets a single test work
+    whether classify() returns:
+        {"platform": "imessage", ...}            # plain dict
+        Intent(platform="imessage", ...)         # dataclass / SimpleNamespace
+        Intent(platform=..., time_info=TimeInfo(day="Tuesday", ...))  # nested
+    """
+    cur = obj
+    for key in path:
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(key)
+        else:
+            cur = getattr(cur, key, None)
+    return cur
+
+
+# ---------------------------------------------------------------------------
+# Test cases
+# ---------------------------------------------------------------------------
+
 @pytest.mark.parametrize(
-    "text, expected_platform, expected_action, expected_contact, expected_time_info",
+    "text, expected",
     [
-        # "reply to mom's text"  ->  iMessage, reply, contact = mom
-        (
-            "reply to mom's text",
-            "imessage", "reply", "mom", None,
-        ),
-        # "send email to John about the deal"  ->  Gmail, contact = John
-        (
-            "send email to John about the deal",
-            "gmail", None, "John", None,
-        ),
-        # "add meeting Tuesday 3pm"  ->  Calendar, create, day = Tuesday
-        (
-            "add meeting Tuesday 3pm",
-            "calendar", "create", None, {"day": "Tuesday"},
-        ),
-        # "fix bug in auth.py"  ->  code-editing task
-        (
-            "fix bug in auth.py",
-            "code", None, None, None,
-        ),
-        # "what did Sarah say on WhatsApp"  ->  WhatsApp, contact = Sarah
-        # Currently failing: pending patch to extract contact when the
-        # platform name appears later in the query (not as the leading token).
         pytest.param(
-            "what did Sarah say on WhatsApp",
-            "whatsapp", None, "Sarah", None,
-            marks=pytest.mark.xfail(
-                reason="Pending patch: WhatsApp contact extraction when "
-                       "platform name appears later in the query"
-            ),
+            "reply to mom's text",
+            {
+                "platform": "imessage",
+                "action": "reply",
+                "contact": "mom",
+            },
+            id="imessage-reply-to-mom",
         ),
-        # "show my LinkedIn DMs"  ->  LinkedIn, read
-        (
+        pytest.param(
+            "send email to John about the deal",
+            {
+                "platform": "gmail",
+                "contact": "John",
+            },
+            id="gmail-email-to-john",
+        ),
+        pytest.param(
+            "add meeting Tuesday 3pm",
+            {
+                "platform": "calendar",
+                "action": "create",
+                "time_info.day": "Tuesday",
+            },
+            id="calendar-create-tuesday",
+        ),
+        pytest.param(
+            "fix bug in auth.py",
+            {
+                "platform": "code",
+            },
+            id="code-fix-bug",
+        ),
+        pytest.param(
+            # NOTE: this assertion depends on the contact-extraction patch
+            # being applied. Until then, the test will fail — which is
+            # the desired signal that the patch is still required.
+            "what did Sarah say on WhatsApp",
+            {
+                "platform": "whatsapp",
+                "contact": "Sarah",
+            },
+            id="whatsapp-read-sarah",
+        ),
+        pytest.param(
             "show my LinkedIn DMs",
-            "linkedin", "read", None, None,
+            {
+                "platform": "linkedin",
+                "action": "read",
+            },
+            id="linkedin-read-dms",
         ),
     ],
 )
-def test_classify(
-    text,
-    expected_platform,
-    expected_action,
-    expected_contact,
-    expected_time_info,
-):
-    """classify() should map a free-form command to the correct intent."""
+def test_classify(text, expected):
     result = classify(text)
 
-    # platform is always present
-    assert result.platform == expected_platform
+    assert result is not None, f"classify({text!r}) returned None"
 
-    # only assert the fields this case is expected to set
-    if expected_action is not None:
-        assert result.action == expected_action
+    for dotted_key, expected_value in expected.items():
+        path = tuple(dotted_key.split("."))
+        actual = _get(result, *path)
+        assert actual == expected_value, (
+            f"classify({text!r}): expected {dotted_key}={expected_value!r}, "
+            f"got {actual!r}"
+        )
 
-    if expected_contact is not None:
-        assert result.contact == expected_contact
 
-    if expected_time_info is not None:
-        for key, value in expected_time_info.items():
-            assert getattr(result.time_info, key) == value
+# ---------------------------------------------------------------------------
+# Optional: assert that *unspecified* fields don't accidentally surface
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "text, must_be_none",
+    [
+        pytest.param(
+            "fix bug in auth.py",
+            ["contact", "time_info"],
+            id="code-has-no-contact-or-time",
+        ),
+    ],
+)
+def test_classify_negative_fields(text, must_be_none):
+    """Fields that don't apply to an intent should be absent/None."""
+    result = classify(text)
+    for key in must_be_none:
+        assert _get(result, key) is None, (
+            f"classify({text!r}): {key!r} should be None, got {_get(result, key)!r}"
+        )
