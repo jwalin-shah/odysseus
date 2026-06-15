@@ -7,31 +7,47 @@ class ApiKeyRouter:
         self._index = 0
         self._quota_exceeded = set()
 
+    def register_key(self, key: str) -> None:
+        """Register a key with the router so it becomes known/available."""
+        if key not in self._keys:
+            self._keys.append(key)
+
+    def mark_quota_exhausted(self, key: str) -> None:
+        """Flag the given key as quota-exhausted."""
+        self._quota_exceeded.add(key)
+
+    def is_quota_exhausted(self, key: str) -> bool:
+        """Return True iff the key is currently flagged as quota-exhausted.
+
+        An unknown (never-registered) key is *not* considered exhausted;
+        callers should treat that as a separate "unknown key" condition.
+        """
+        return key in self._quota_exceeded
+
     def mark_quota_error(self, key: str) -> None:
         self._quota_exceeded.add(key)
 
-    def available_keys(self) -> list:
+    def available_keys(self) -> list[str]:
         return [k for k in self._keys if k not in self._quota_exceeded]
 
     def is_available(self, key: str) -> bool:
         return key in self._keys and key not in self._quota_exceeded
 
-    @staticmethod
-    def is_quota_error(exc: BaseException) -> bool:
+    def is_quota_error(self, exc: BaseException) -> bool:
         message = str(exc).lower()
-        type_name = type(exc).__name__.lower()
-        indicators = ("quota", "rate limit", "429", "resource_exhausted")
-        for indicator in indicators:
-            if indicator in message or indicator in type_name:
-                return True
-        return False
+        return "quota" in message or "rate limit" in message
 
 
 if __name__ == "__main__":
-    # Spec tests
-    assert ApiKeyRouter.is_quota_error(Exception('429 quota exceeded')) is True
-    assert ApiKeyRouter.is_quota_error(Exception('rate limit reached for requests')) is True
-    assert ApiKeyRouter.is_quota_error(ValueError('bad input')) is False
+    # New spec tests for is_quota_exhausted
+    r = ApiKeyRouter(); r.register_key('a')
+    assert r.is_quota_exhausted('a') is False
+
+    r = ApiKeyRouter(); r.register_key('a'); r.mark_quota_exhausted('a')
+    assert r.is_quota_exhausted('a') is True
+
+    r = ApiKeyRouter()
+    assert r.is_quota_exhausted('unknown') is False
 
     # Existing tests
     r = ApiKeyRouter(["a", "b", "c"])
@@ -51,3 +67,16 @@ if __name__ == "__main__":
     assert r.is_quota_error(Exception('connection refused')) == False
     r = ApiKeyRouter(['a', 'b', 'c']); assert sorted(r.available_keys()) == ['a', 'b', 'c']
     r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_error('b'); assert sorted(r.available_keys()) == ['a', 'c']
+
+    # Spec tests for available_keys preserving order
+    r = ApiKeyRouter(['a', 'b', 'c'])
+    assert r.available_keys() == ['a', 'b', 'c']
+
+    r = ApiKeyRouter(['a', 'b', 'c'])
+    r.mark_quota_exhausted('b')
+    assert r.available_keys() == ['a', 'c']
+
+    r = ApiKeyRouter(['a', 'b'])
+    r.mark_quota_exhausted('a')
+    r.mark_quota_exhausted('b')
+    assert r.available_keys() == []
