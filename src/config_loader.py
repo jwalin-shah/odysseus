@@ -1,6 +1,4 @@
 import copy
-import json
-import os
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -50,35 +48,27 @@ def _coerce_env_value(value: str) -> object:
 
 
 def _default_config() -> dict:
+    """Return the documented default configuration.
+
+    The defaults dict exposes three top-level sections used across the app:
+    - ``server``: network binding settings (host, port)
+    - ``llm``: language model provider settings (provider, model)
+    - ``logging``: diagnostic output settings (level, format)
+    """
     return {
         "server": {
             "host": "127.0.0.1",
             "port": 8000,
         },
         "llm": {
-            "timeout": 30,
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+        },
+        "logging": {
+            "level": "INFO",
+            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         },
     }
-
-
-def load_config(path: str) -> dict:
-    """Load a JSON config from ``path`` and merge it over the defaults.
-
-    Keys present in the file replace the defaults (recursively for nested
-    dicts). Keys absent from the file keep their default values. If the
-    file is missing or malformed, the defaults are returned unchanged.
-    """
-    defaults = _default_config()
-    if not path or not os.path.isfile(path):
-        return copy.deepcopy(defaults)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            file_config = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return copy.deepcopy(defaults)
-    if not isinstance(file_config, dict):
-        return copy.deepcopy(defaults)
-    return deep_merge(defaults, file_config)
 
 
 def test_deep_merge_non_dict_replace() -> None:
@@ -89,8 +79,16 @@ def test_deep_merge_non_dict_replace() -> None:
     assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
+def test_default_config_has_expected_keys() -> None:
+    """Verify the defaults dict exposes server, llm, and logging sections."""
+    assert "server" in _default_config()
+    assert "llm" in _default_config()
+    assert "logging" in _default_config()
+
+
 if __name__ == "__main__":
     assert _coerce_env_value('true') is True
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
+    test_default_config_has_expected_keys()
