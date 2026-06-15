@@ -1,32 +1,3 @@
-from types import SimpleNamespace
-
-
-# Pricing table: model name (lowercase) -> (input_usd_per_1k, output_usd_per_1k)
-# Values are USD per 1,000 tokens, based on publicly published OpenAI pricing.
-_PRICE_TABLE = {
-    "gpt-4": (0.03, 0.06),
-    "gpt-4-32k": (0.06, 0.12),
-    "gpt-4-turbo": (0.01, 0.03),
-    "gpt-4-turbo-preview": (0.01, 0.03),
-    "gpt-4o": (0.005, 0.015),
-    "gpt-4o-mini": (0.00015, 0.0006),
-    "gpt-3.5-turbo": (0.0005, 0.0015),
-    "gpt-3.5-turbo-16k": (0.003, 0.004),
-    "gpt-3.5-turbo-instruct": (0.0015, 0.002),
-}
-
-
-def model_price_per_1k(model: str) -> tuple[float, float]:
-    """Return (input_usd_per_1k, output_usd_per_1k) for a model name.
-
-    Lookup is case-insensitive. Unknown / empty models default to (0.0, 0.0).
-    """
-    if not model:
-        return (0.0, 0.0)
-    key = str(model).strip().lower()
-    return _PRICE_TABLE.get(key, (0.0, 0.0))
-
-
 def parse_trajectory_step(step: dict) -> tuple[str, int, int]:
     """Extract (model_id, input_tokens, output_tokens) from a trajectory step.
 
@@ -144,8 +115,18 @@ def extract_step_usage(step) -> tuple:
     return (str(model_id), int(input_tokens), int(output_tokens))
 
 
+def build_trajectory_log(steps: list) -> dict:
+    """Construct a trajectory_log dict wrapping a list of step dicts.
+
+    Preserves the order of `steps` as provided. The result has the form
+    ``{"steps": [...]}``.
+    """
+    return {"steps": list(steps)}
+
+
+from types import SimpleNamespace
 assert extract_step_usage(SimpleNamespace(model='gpt-4o', input_tokens=1000, output_tokens=500)) == ('gpt-4o', 1000, 500)
 assert extract_step_usage({'model': 'gpt-4o-mini', 'prompt_tokens': 200, 'completion_tokens': 100}) == ('gpt-4o-mini', 200, 100)
-assert model_price_per_1k('gpt-4') == (0.03, 0.06)
-assert model_price_per_1k('GPT-4') == (0.03, 0.06)
-assert model_price_per_1k('unknown-model') == (0.0, 0.0)
+assert build_trajectory_log([]) == {'steps': []}
+assert build_trajectory_log([{'model': 'gpt-4'}]) == {'steps': [{'model': 'gpt-4'}]}
+log = build_trajectory_log([{'a': 1}, {'b': 2}]); assert log['steps'][0] == {'a': 1} and log['steps'][1] == {'b': 2}
