@@ -1,13 +1,15 @@
 import hashlib
-import json
 
 
-def compute_message_hash(message: dict) -> str:
-    """Compute a stable hash for a message dictionary."""
-    message_str = json.dumps(message, sort_keys=True, default=str)
-    return hashlib.sha256(message_str.encode("utf-8")).hexdigest()
-
-
-def filter_new_messages(messages: list, seen_hashes: set) -> list:
-    """Return the subset of messages whose hash is not in seen_hashes, preserving order."""
-    return [msg for msg in messages if compute_message_hash(msg) not in seen_hashes]
+def compute_message_hash(msg: dict) -> str:
+    # Extract identifying fields, supporting common naming conventions
+    msg_id = msg.get("id", "")
+    sender = msg.get("from", msg.get("sender", ""))
+    timestamp = msg.get("ts", msg.get("timestamp", ""))
+    body = msg.get("body", "")
+    
+    # Concatenate fields in a deterministic order using a separator
+    content = f"{msg_id}|{sender}|{timestamp}|{body}"
+    
+    # Compute SHA-256 hex digest
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
