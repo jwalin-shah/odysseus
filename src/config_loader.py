@@ -15,36 +15,39 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_defaults() -> dict:
-    """Return the built-in baseline configuration dictionary.
+def _coerce_env_value(value: str) -> object:
+    """Coerce a raw env-var string into bool, int, float, or str.
 
-    This is the lowest-priority configuration layer: user settings,
-    environment variables, and explicit overrides are merged on top
-    of it via deep_merge(). Values here are deliberately conservative
-    so that running the app out of the box (without any user config)
-    produces a working, safe default.
+    Bool check is case-insensitive and only matches the literal strings
+    'true' / 'false' — '1' / '0' are not treated as booleans and stay ints.
+    Falls back to the original string when no numeric conversion applies.
     """
-    return {
-        "host": "localhost",
-        "port": 8000,
-        "debug": False,
-        "database": {
-            "host": "localhost",
-            "port": 5432,
-            "name": "app",
-            "pool": 5,
-        },
-        "logging": {
-            "level": "INFO",
-            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        },
-        "cache": {
-            "enabled": True,
-            "ttl": 300,
-        },
-    }
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return value
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in ("null", "none"):
+        return None
+    stripped = value.strip()
+    try:
+        return int(stripped)
+    except ValueError:
+        pass
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+    return value
 
 
-assert load_defaults()['host'] == 'localhost'
-assert load_defaults()['database']['pool'] == 5
-assert isinstance(load_defaults(), dict)
+if __name__ == "__main__":
+    assert _coerce_env_value('true') is True
+    assert _coerce_env_value('42') == 42
+    assert _coerce_env_value('hello') == 'hello'
