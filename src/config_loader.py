@@ -47,7 +47,13 @@ def _coerce_env_value(value: str) -> object:
     return value
 
 
+def test_deep_merge_nested_override() -> None:
+    assert deep_merge({'a': {'x': 1, 'y': 2}}, {'a': {'y': 99, 'z': 3}}) == {'a': {'x': 1, 'y': 99, 'z': 3}}
+    assert deep_merge({'a': {'b': {'c': 1}}}, {'a': {'b': {'d': 2}}}) == {'a': {'b': {'c': 1, 'd': 2}}}
+
+
 if __name__ == "__main__":
     assert _coerce_env_value('true') is True
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
+    test_deep_merge_nested_override()
