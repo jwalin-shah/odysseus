@@ -27,6 +27,12 @@ _PROMPT_TEMPLATES = {
         "Old text:\n{old_text}\n\n"
         "New text:\n{new_text}\n"
     ),
+    "JUDGE": (
+        "You are an impartial judge evaluating the following task or output.\n\n"
+        "Task:\n{task}\n\n"
+        "Please assess the task/output for correctness, completeness, and quality. "
+        "Provide a clear verdict with detailed reasoning."
+    ),
 }
 
 
@@ -83,3 +89,22 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
     if instruction:
         prompt += f"\n\nAdditional instruction:\n{instruction}"
     return prompt
+
+
+def build_judge_prompt(task_desc: str) -> str:
+    """Build a prompt asking the model to judge a task description.
+
+    Args:
+        task_desc: Description of the task to be evaluated.
+
+    Returns:
+        The formatted prompt string with ``task_desc`` embedded in place of
+        the ``{task}`` placeholder.
+    """
+    template = get_prompt_template("JUDGE")
+    return template.format(task=task_desc)
+
+
+assert isinstance(build_judge_prompt('ship the release'), str)
+assert 'ship the release' in build_judge_prompt('ship the release')
+assert '{task}' not in build_judge_prompt('anything')
