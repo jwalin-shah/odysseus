@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 import os
 from typing import Callable
 
-from src.intent_router import classify
 from src.inbox_tool import (
     get_calendar_upcoming,
     get_gmail_unread,
@@ -98,22 +97,3 @@ def _handle_general(user_text: str, context: dict) -> HarnessResult:
         content="I can help with iMessage, Gmail, WhatsApp, Calendar, LinkedIn, or code.",
         action_taken="general_help",
     )
-
-
-_HANDLERS: dict[str, Callable[[str, dict], HarnessResult]] = {
-    "read": _handle_read,
-    "send": lambda u, c: _handle_send_or_reply(u, c, "send"),
-    "reply": lambda u, c: _handle_send_or_reply(u, c, "reply"),
-    "calendar_create": _handle_calendar_create,
-    "code": _handle_code,
-    "general": _handle_general,
-}
-
-
-def run_harness(user_text: str, context: dict | None = None) -> HarnessResult:
-    ctx = context or {}
-    intent = classify(user_text, ctx)
-    handler = _HANDLERS.get(intent)
-    if handler is None:
-        return _handle_general(user_text, ctx)
-    return handler(user_text, ctx)
