@@ -1,39 +1,26 @@
-"""Prompt template registry.
-
-Exposes a name-keyed registry mapping each supported prompt template
-identifier to its zero-argument factory function. Each factory returns
-a fresh PromptTemplate instance identified by its name.
-"""
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Callable
 
 
 @dataclass
 class PromptTemplate:
-    """A named prompt template."""
-
     name: str
-    description: str = ""
-    body: str = ""
+    body: str
 
 
-def _factory(name: str) -> Callable[[], PromptTemplate]:
-    """Build a zero-argument factory that produces a PromptTemplate with the given name."""
-
-    def _build() -> PromptTemplate:
-        return PromptTemplate(name=name)
-
-    _build.__name__ = f"make_{name.lower()}"
-    return _build
-
-
-def list_templates() -> dict[str, Callable[[], PromptTemplate]]:
-    """Return a name-keyed registry of supported template factory functions."""
-    return {
-        "IMPLEMENT_FN": _factory("IMPLEMENT_FN"),
-        "IMPROVE_FILE": _factory("IMPROVE_FILE"),
-        "REVIEW": _factory("REVIEW"),
-        "SEARCH_REPLACE": _factory("SEARCH_REPLACE"),
-    }
+def build_implement_fn_template() -> PromptTemplate:
+    body = (
+        "You are an expert Python developer. Your task is to implement a new "
+        "function based on the provided signature and docstring.\n\n"
+        "Function signature:\n{signature}\n\n"
+        "Docstring:\n{docstring}\n\n"
+        "Requirements:\n"
+        "1. Implement the function so that it fully satisfies the behavior "
+        "described in the docstring.\n"
+        "2. Include any necessary import statements at the top of the code.\n"
+        "3. Follow PEP 8 style guidelines and write clean, readable, well-"
+        "documented code.\n"
+        "4. Handle edge cases and invalid inputs gracefully where appropriate.\n"
+        "5. Return only the complete, runnable function implementation without "
+        "any additional explanations, markdown formatting, or code fences."
+    )
+    return PromptTemplate(name="IMPLEMENT_FN", body=body)
