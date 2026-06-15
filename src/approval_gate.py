@@ -1,3 +1,6 @@
+import time
+
+
 def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
     lines = [f"Approve {action_name}?"]
     for key, value in action_args.items():
@@ -100,6 +103,27 @@ def parse_confirmation(raw: str) -> str:
 assert parse_confirmation('y') == 'approve'
 assert parse_confirmation('N') == 'deny'
 assert parse_confirmation('maybe') == 'unknown'
+
+
+def record_approval_audit_event(event_type: str, action_kind: str, owner: str, decision: str) -> dict:
+    """Build a structured audit record for an approval gate decision.
+
+    Captures the event type, the kind of action that was gated, the owner
+    (actor) making the decision, the decision itself, and a wall-clock
+    timestamp taken at the moment the event is recorded.
+    """
+    return {
+        "event_type": event_type,
+        "action_kind": action_kind,
+        "owner": owner,
+        "decision": decision,
+        "timestamp": time.time(),
+    }
+
+
+assert record_approval_audit_event('confirm', 'send', 'alice', 'approve')['decision'] == 'approve'
+assert record_approval_audit_event('confirm', 'send', 'alice', 'approve')['action_kind'] == 'send'
+assert 'timestamp' in record_approval_audit_event('confirm', 'send', 'alice', 'deny')
 
 
 def gate_write_action(tool_name: str, args: dict, input_fn=None) -> bool:
