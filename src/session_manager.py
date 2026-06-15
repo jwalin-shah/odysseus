@@ -1,17 +1,18 @@
-from dataclasses import dataclass, field
-import time
-import uuid
-
-
-@dataclass
 class Session:
-    session_id: str
-    messages: list = field(default_factory=list)
-    pending_actions: list = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    metadata: dict = field(default_factory=dict)
+    def __init__(self, name):
+        self.name = name
+        self.messages = []
 
 
-def make_session(session_id: str) -> 'Session':
-    return Session(session_id=session_id)
+def make_session(name):
+    return Session(name)
+
+
+def append_message(session, role, content):
+    session.messages.append({'role': role, 'content': content})
+
+
+def get_conversation_history(session, limit=None):
+    if limit is None:
+        return list(session.messages)
+    return list(session.messages[-limit:])
