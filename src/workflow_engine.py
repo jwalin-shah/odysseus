@@ -1,89 +1,47 @@
-"""Deterministic workflow engine for Odysseus.
+"""Deterministic, approval-gated inbox workflows."""
 
-Workflows are predefined, side-effect-aware sequences of inbox actions.
-The engine itself contains **no LLM logic** — it is a thin orchestrator
-over :mod:`src.inbox_tool`. Decisions about *which* workflow to run and
-*what arguments* to pass are made by the agent loop elsewhere; this
-module only knows how to execute the steps.
-
-A :class:`Step` declares:
-  1. The inbox_tool call to make
-  2. Whether that call needs human sign-off (``needs_approval``)
-  3. How to package the result
-
-If a step requires approval it raises :class:`ApprovalRequired`. The
-:func:`with_approval_gate` middleware catches that, asks the agent
-loop to confirm, and either re-executes the step or aborts.
-"""
-
-from __future__ import annotations
-
-import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-
-log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Approval machinery
-# ---------------------------------------------------------------------------
+from src import inbox_tool
 
 
 class ApprovalRequired(Exception):
-    """Raised by a workflow step when its action needs human approval.
-
-    Attributes
-    ----------
-    action:
-        Short, machine-readable name of the action (e.g. ``"send_imessage"``).
-    payload:
-        The arguments that *would* be sent to the inbox tool. The approval
-        handler may inspect, log, or modify this dict before approving.
-    step:
-        The :class:`Step` that raised the exception. The gate re-executes
-        this step directly on approval so closures stay intact.
-    """
-
-    def __init__(
-        self,
-        action: str,
-        payload: dict,
-        step: Optional["Step"] = None,
-    ) -> None:
+    def __init__(self, action: str, payload: dict):
         super().__init__(f"Approval required for {action}")
         self.action = action
         self.payload = payload
-        self.step = step
 
 
-class ApprovalDenied(Exception):
-    """Raised by the gate when the operator refuses the action."""
+def inbox_summary_flow() -> dict[str, int]:
+    platforms = ("gmail", "slack", "outlook")
+    summary: dict[str, int] = {}
+    for platform in platforms:
+        count = inbox_tool.get_unread_count(platform)
+        if count is None:
+            raise ValueError(
+                f"get_unread_count returned None for platform: {platform!r}"
+            )
+        summary[platform] = int(count)
+    return summary
 
 
-# ---------------------------------------------------------------------------
-# Step abstraction
-# ---------------------------------------------------------------------------
+def reply_flow(platform: str, message_id: str, body: str) -> None:
+    raise ApprovalRequired(
+        "send_reply",
+        {"platform": platform, "message_id": message_id, "body": body},
+    )
 
 
-@dataclass
-class Step:
-    """A single inbox action.
-
-    Purely deterministic: declares *what* to call and *whether* it
-    needs sign-off. The actual LLM-driven planning happens elsewhere.
-    """
-
-    name: str
-    needs_approval: bool
-    run: Callable[[], Any]
-    payload: dict = field(default_factory=dict)
-
-    def execute(self) -> Any:
-        log.info("workflow step start: %s (approval=%s)", self.name, self.needs_approval)
-        if self.needs_approval:
-            log.info("workflow step requires approval: %s", self.name)
-            raise ApprovalRequired(action=self.name, payload=self.payload, step=self)
-        result = self.run()
-        log.info("workflow step ok:   %s", self.name)
-        return result
+def calendar_add_flow(
+    title: str,
+    start: str,
+    end: str,
+    attendees: list[str] | None = None,
+) -> None:
+    raise ApprovalRequired(
+        "create_calendar_event",
+        {
+            "title": title,
+            "start": start,
+            "end": end,
+            "attendees": attendees or [],
+        },
+    )
