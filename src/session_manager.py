@@ -1,31 +1,53 @@
-from typing import List, Dict, Any
+# src/session_manager.py
+"""Session manager module providing functions to track sessions and pending actions."""
 
-_sessions: Dict[str, List[Dict[str, Any]]] = {}
-
+_sessions = {}
 
 def make_session(session_id: str) -> str:
-    _sessions[session_id] = []
+    """Create a new session if it does not already exist.
+    
+    Args:
+        session_id: The unique identifier for the session.
+    
+    Returns:
+        The session id.
+    """
+    if session_id not in _sessions:
+        _sessions[session_id] = {'pending': set()}
     return session_id
 
-
-def append_message(session_id: str, role: str, content: str) -> None:
+def add_pending_action(session_id: str, action: dict) -> None:
+    """Add a pending action to the specified session.
+    
+    Args:
+        session_id: The session identifier.
+        action: A dictionary representing the action. Must contain an 'id' key.
+    """
     if session_id not in _sessions:
-        _sessions[session_id] = []
-    _sessions[session_id].append({"role": role, "content": content})
+        make_session(session_id)
+    action_id = action.get('id')
+    if action_id is not None:
+        _sessions[session_id]['pending'].add(action_id)
 
+def resolve_pending_action(session_id: str, action_id: str) -> None:
+    """Mark a pending action as resolved by removing it from the pending set.
+    
+    Args:
+        session_id: The session identifier.
+        action_id: The identifier of the action to resolve.
+    """
+    if session_id in _sessions:
+        _sessions[session_id]['pending'].discard(action_id)
 
-def get_history(session_id: str) -> List[Dict[str, Any]]:
-    return _sessions.get(session_id, [])
-
-
-def trim_history(session_id: str, keep_last: int) -> int:
-    history = get_history(session_id)
-    current_len = len(history)
-    if current_len <= keep_last:
+def pending_action_count(session_id: str) -> int:
+    """Return the number of pending (unresolved) actions for the given session.
+    
+    Args:
+        session_id: The session identifier.
+    
+    Returns:
+        The integer count of pending actions. Returns 0 if the session does not exist.
+    """
+    if session_id not in _sessions:
         return 0
-    to_remove = current_len - keep_last
-    if keep_last > 0:
-        _sessions[session_id] = history[-keep_last:]
-    else:
-        _sessions[session_id] = []
-    return to_remove
+    return len(_sessions[session_id]['pending'])
