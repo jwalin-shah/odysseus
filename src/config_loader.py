@@ -71,11 +71,12 @@ def test_deep_merge_non_dict_replace() -> None:
     assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
-def test_deep_merge_empty_inputs() -> None:
-    """Asserts correct behavior when one or both inputs are empty dicts."""
-    assert deep_merge({'x': {'y': 1}}, {}) == {'x': {'y': 1}}
-    assert deep_merge({}, {'x': {'y': 1}}) == {'x': {'y': 1}}
-    assert deep_merge({}, {}) == {}
+def test_deep_merge_nested_override() -> None:
+    """Asserts that nested scalar values in b override values in a while
+    sibling keys from a are preserved."""
+    assert deep_merge({'a': {'x': 1, 'y': 2}}, {'a': {'y': 99, 'z': 3}}) == {'a': {'x': 1, 'y': 99, 'z': 3}}
+    assert deep_merge({'db': {'host': 'old', 'port': 5432}}, {'db': {'host': 'new'}}) == {'db': {'host': 'new', 'port': 5432}}
+    assert deep_merge({'k': {'nested': {'deep': 'a'}}}, {'k': {'nested': {'deep': 'b'}}}) == {'k': {'nested': {'deep': 'b'}}}
 
 
 if __name__ == "__main__":
@@ -83,4 +84,4 @@ if __name__ == "__main__":
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
-    test_deep_merge_empty_inputs()
+    test_deep_merge_nested_override()
