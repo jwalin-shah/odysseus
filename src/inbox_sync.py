@@ -1,3 +1,4 @@
-def merge_hash_sets(existing: set, additions) -> set:
-    """Return a new set containing the union of existing and additions."""
-    return existing.union(additions)
+def next_sync_cursor(messages: list[dict], cursor_field: str = "ts") -> object:
+    if not messages:
+        return None
+    return max(msg[cursor_field] for msg in messages)
