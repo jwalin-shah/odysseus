@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable
 
 from src.intent_router import classify
 from src.inbox_tool import (
@@ -98,36 +98,15 @@ def _handle_general(user_text: str, context: dict) -> HarnessResult:
 
 _HANDLERS: dict[str, Callable[[str, dict], HarnessResult]] = {
     "read": _handle_read,
-    "send": lambda t, c: _handle_send_or_reply(t, c, "send"),
-    "reply": lambda t, c: _handle_send_or_reply(t, c, "reply"),
     "calendar_create": _handle_calendar_create,
     "code": _handle_code,
     "general": _handle_general,
 }
 
 
-def _resolve_intent(classified) -> str:
-    """Normalize the classify() return value to an intent name string."""
-    if hasattr(classified, "intent"):
-        return str(classified.intent)
-    if isinstance(classified, dict):
-        return str(classified.get("intent", "general"))
-    return str(classified) if classified else "general"
-
-
-def route(user_text: str, context: Optional[dict] = None) -> HarnessResult:
-    """Classify intent and dispatch to deterministic handler."""
-    if context is None:
-        context = {}
-
-    try:
-        classified = classify(user_text)
-    except Exception as exc:  # noqa: BLE001 - surface error to caller
-        return HarnessResult(
-            content=f"Intent classification failed: {exc}",
-            action_taken="classify_error",
-        )
-
-    intent_name = _resolve_intent(classified)
-    handler = _HANDLERS.get(intent_name, _handle_general)
-    return handler(user_text, context)
+def run(user_text: str, context: dict = None) -> HarnessResult:
+    intent = classify(user_text)
+    if intent in ("send", "reply"):
+        return _handle_send_or_reply(user_text, context, intent)
+    handler = _HANDLERS.get(intent, _handle_general)
+    return handler(user_text, context or {})
