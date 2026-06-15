@@ -28,28 +28,14 @@ _PROMPT_TEMPLATES = {
         "Replace text:\n{replace_text}\n\n"
         "Replace {scope} of the search text with the replace text.\n"
     ),
-    "REFACTOR": (
-        "You are a senior software engineer tasked with refactoring code to improve its quality.\n\n"
-        "Please refactor the following code to improve:\n"
-        "- Readability and clarity\n"
-        "- Modularity and reusability\n"
-        "- Performance where applicable\n"
-        "- Adherence to best practices and idioms\n\n"
-        "Code to refactor:\n{code}\n\n"
-        "Constraints:\n{constraints}\n\n"
-        "Provide the refactored code along with a brief explanation of the changes made."
+    "IMPROVE_FILE": (
+        "You are a senior software engineer. Suggest improvements for the following file based on the specified goals.\n\n"
+        "File path: {file_path}\n\n"
+        "Current content:\n{file_content}\n\n"
+        "Improvement goals:\n{goals}\n\n"
+        "Please provide concrete, actionable improvements that address each of these goals. Show the suggested changes clearly so they can be applied to the file."
     ),
 }
-
-
-def list_prompt_templates() -> list:
-    """Return the list of registered prompt template names.
-
-    Returns:
-        A list of strings, where each string is the name of a registered
-        prompt template that can be passed to :func:`get_prompt_template`.
-    """
-    return list(_PROMPT_TEMPLATES.keys())
 
 
 def get_prompt_template(name: str) -> str:
@@ -104,3 +90,19 @@ def build_search_replace_prompt(file_path: str, search_text: str, replace_text: 
         replace_text=replace_text,
         scope=scope,
     )
+
+
+def build_improve_file_prompt(file_path: str, file_content: str, goals: list) -> str:
+    """Build a prompt asking the model to suggest improvements for an existing file.
+
+    Args:
+        file_path: Path to the file that should be improved.
+        file_content: The current contents of the file.
+        goals: A list of improvement goal keywords (e.g. ``["performance"]`` or
+            ``["performance", "readability"]``).
+
+    Returns:
+        The formatted prompt string.
+    """
+    template = get_prompt_template("IMPROVE_FILE")
+    return template.format(file_path=file_path, file_content=file_content, goals=goals)
