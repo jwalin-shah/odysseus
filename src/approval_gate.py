@@ -1,35 +1,17 @@
-# List of harness action names that require user approval before execution.
-# These are "write" actions that modify state or send data externally.
-_WRITE_ACTIONS = [
-    "send",
-    "calendar_create",
-    "calendar_update",
-    "calendar_delete",
-    "email_send",
-    "email_reply",
-    "file_write",
-    "file_delete",
-    "file_move",
-    "shell_exec",
-    "http_post",
-    "http_put",
-    "http_delete",
-    "db_write",
-    "db_update",
-    "db_delete",
-    "deploy",
-    "payment_send",
-    "message_post",
-    "task_complete",
-]
+def format_action_preview(action: str, payload: dict) -> str:
+    """Build a human-readable single-string summary of a pending harness action.
 
-
-def list_write_actions() -> list:
-    """Return the canonical list of harness action names requiring user approval.
+    Args:
+        action: The name of the action to be performed (e.g. 'send', 'calendar_create').
+        payload: A mapping of parameter names to their values for the action.
 
     Returns:
-        list: A list of strings representing action names that mutate state
-        or perform side effects and therefore must be approved by the user
-        before execution.
+        A single string summarizing the action and its parameters.
     """
-    return list(_WRITE_ACTIONS)
+    if not payload:
+        return action
+
+    formatted_params = ", ".join(
+        f"{key}={value}" for key, value in payload.items()
+    )
+    return f"{action}({formatted_params})"
