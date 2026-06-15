@@ -94,6 +94,6 @@ def _handle_code(user_text: str, context: dict) -> HarnessResult:
 
 def _handle_general(user_text: str, context: dict) -> HarnessResult:
     return HarnessResult(
-        content="I can help with iMessage, Gmail, WhatsApp, Calendar, LinkedIn, or code.",
+        content="I can help with iMessage, Gmail, Calendar, LinkedIn, or code.",
         action_taken="general_help",
     )
