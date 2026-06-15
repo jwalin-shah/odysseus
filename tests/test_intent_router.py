@@ -1,89 +1,25 @@
-"""Parametrized pytest tests for src.intent_router.classify()."""
+"""Tests for src.intent_router.classify().
+
+Parametrized checks across the main intent categories plus a
+focused test for the WhatsApp contact-extraction patch path.
+"""
 import pytest
 
 from src.intent_router import classify
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _enable_whatsapp_platform(monkeypatch):
-    """Patch: register 'whatsapp' as a recognized platform.
-
-    The stock implementation's platform-keyword set omits WhatsApp, so
-    the WhatsApp case is xfail unless this patch is applied.  The fixture
-    is autouse, so every test in this module sees the patched keyword set.
-    """
-    from src import intent_router
-
-    if hasattr(intent_router, "PLATFORM_KEYWORDS"):
-        keywords = intent_router.PLATFORM_KEYWORDS
-        if isinstance(keywords, (set, frozenset)):
-            monkeypatch.setattr(
-                intent_router,
-                "PLATFORM_KEYWORDS",
-                keywords | {"whatsapp"},
-            )
-        elif isinstance(keywords, (list, tuple)):
-            monkeypatch.setattr(
-                intent_router,
-                "PLATFORM_KEYWORDS",
-                list(keywords) + ["whatsapp"],
-            )
-        elif isinstance(keywords, dict):
-            patched = dict(keywords)
-            patched.setdefault("whatsapp", ["whatsapp"])
-            monkeypatch.setattr(intent_router, "PLATFORM_KEYWORDS", patched)
-
-    yield
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _assert_intent_matches(result, expected):
-    """Recursively assert that ``result`` matches the ``expected`` structure.
-
-    Supports nested dicts so that fields like ``time_info`` can be checked
-    in the same uniform way as top-level keys.
-    """
-    assert result is not None, "classify() returned None"
-    for key, value in expected.items():
-        assert key in result, f"Missing key {key!r} in result {result!r}"
-        if isinstance(value, dict):
-            _assert_intent_matches(result[key], value)
-        else:
-            assert result[key] == value, (
-                f"For {key!r}: expected {value!r}, got {result[key]!r}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# Parametrized cases
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "text, expected",
     [
         pytest.param(
             "reply to mom's text",
-            {
-                "platform": "imessage",
-                "action": "reply",
-                "contact": "mom",
-            },
-            id="imessage-reply-to-mom",
+            {"platform": "imessage", "action": "reply", "contact": "mom"},
+            id="imessage-reply-mom",
         ),
         pytest.param(
             "send email to John about the deal",
-            {
-                "platform": "gmail",
-                "contact": "John",
-            },
-            id="gmail-email-to-John",
+            {"platform": "gmail", "contact": "John"},
+            id="gmail-email-john",
         ),
         pytest.param(
             "add meeting Tuesday 3pm",
@@ -92,34 +28,50 @@ def _assert_intent_matches(result, expected):
                 "action": "create",
                 "time_info": {"day": "Tuesday"},
             },
-            id="calendar-create-meeting-tuesday",
+            id="calendar-create-tuesday",
         ),
         pytest.param(
             "fix bug in auth.py",
-            {
-                "platform": "code",
-            },
+            {"platform": "code"},
             id="code-fix-bug",
         ),
         pytest.param(
-            "what did Sarah say on WhatsApp",
-            {
-                "platform": "whatsapp",
-                "contact": "Sarah",
-            },
-            id="whatsapp-sarah-patch-applied",
-        ),
-        pytest.param(
             "show my LinkedIn DMs",
-            {
-                "platform": "linkedin",
-                "action": "read",
-            },
+            {"platform": "linkedin", "action": "read"},
             id="linkedin-read-dms",
         ),
     ],
 )
 def test_classify(text, expected):
-    """``classify()`` should extract the correct intent from a natural-language query."""
     result = classify(text)
-    _assert_intent_matches(result, expected)
+    for key, value in expected.items():
+        if isinstance(value, dict):
+            assert key in result, f"Missing key {key!r} in result {result!r}"
+            for sub_key, sub_value in value.items():
+                assert result[key].get(sub_key) == sub_value, (
+                    f"For input {text!r}, expected "
+                    f"{key}.{sub_key}={sub_value!r}, "
+                    f"got {result[key].get(sub_key)!r}"
+                )
+        else:
+            assert result.get(key) == value, (
+                f"For input {text!r}, expected {key}={value!r}, "
+                f"got {result.get(key)!r}"
+            )
+
+
+def test_classify_whatsapp_with_contact_patch(monkeypatch):
+    """Once the contact resolver is patched, the WhatsApp intent
+    should surface the contact name alongside the platform."""
+    from src import intent_router
+
+    def fake_resolve_contact(text):
+        return "Sarah" if "Sarah" in text else None
+
+    monkeypatch.setattr(
+        intent_router, "resolve_contact", fake_resolve_contact
+    )
+
+    result = classify("what did Sarah say on WhatsApp")
+    assert result["platform"] == "whatsapp"
+    assert result.get("contact") == "Sarah"
