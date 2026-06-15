@@ -1,40 +1,32 @@
-from typing import Any
+from typing import List, Dict, Any
 
+# In-memory storage for sessions
+_sessions: Dict[str, Dict[str, Any]] = {}
 
-# Global in-memory store for sessions
-_sessions: dict[str, dict[str, Any]] = {}
-
-
-def make_session(session_id: str) -> dict:
-    """Create a new session if it doesn't exist, then return it."""
+def make_session(session_id: str) -> str:
+    """Create a new session with the given ID."""
     if session_id not in _sessions:
         _sessions[session_id] = {
-            "id": session_id,
-            "pending_actions": [],
+            'history': []
         }
-    return _sessions[session_id]
+    return session_id
 
-
-def add_pending_action(session_id: str, action: dict) -> None:
-    """Append a pending action to the session's pending actions list."""
+def append_message(session_id: str, role: str, content: str) -> None:
+    """Append a message to the session's history."""
     if session_id not in _sessions:
         make_session(session_id)
-    _sessions[session_id]["pending_actions"].append(action)
+    _sessions[session_id]['history'].append({'role': role, 'content': content})
 
-
-def resolve_pending_action(session_id: str, action_id: str) -> None:
-    """Remove a pending action from the session by its 'id' field."""
-    if session_id not in _sessions:
-        return
-    session = _sessions[session_id]
-    session["pending_actions"] = [
-        action for action in session["pending_actions"]
-        if action.get("id") != action_id
-    ]
-
-
-def list_pending_actions(session_id: str) -> list[dict]:
-    """Return the list of all currently unresolved pending actions attached to the session, preserving insertion order."""
+def get_history(session_id: str) -> List[Dict[str, str]]:
+    """Get the conversation history for a session."""
     if session_id not in _sessions:
         return []
-    return list(_sessions[session_id]["pending_actions"])
+    return list(_sessions[session_id]['history'])
+
+def clear_history(session_id: str) -> int:
+    """Clear the session's conversation history and return the number of messages removed."""
+    if session_id not in _sessions:
+        return 0
+    count = len(_sessions[session_id]['history'])
+    _sessions[session_id]['history'] = []
+    return count
