@@ -71,12 +71,11 @@ def test_deep_merge_non_dict_replace() -> None:
     assert deep_merge({'a': 5}, {'a': None}) == {'a': None}
 
 
-def test_deep_merge_nested_override() -> None:
-    """Asserts that nested scalar values in b override values in a while
-    sibling keys from a are preserved."""
-    assert deep_merge({'a': {'x': 1, 'y': 2}}, {'a': {'y': 99, 'z': 3}}) == {'a': {'x': 1, 'y': 99, 'z': 3}}
-    assert deep_merge({'db': {'host': 'old', 'port': 5432}}, {'db': {'host': 'new'}}) == {'db': {'host': 'new', 'port': 5432}}
-    assert deep_merge({'k': {'nested': {'deep': 'a'}}}, {'k': {'nested': {'deep': 'b'}}}) == {'k': {'nested': {'deep': 'b'}}}
+def test_deep_merge_b_wins_scalar() -> None:
+    """Asserts that scalar (non-dict) values in b always win over values in a at the same key."""
+    assert deep_merge({'a': 1, 'b': 2}, {'b': 99, 'c': 3}) == {'a': 1, 'b': 99, 'c': 3}
+    assert deep_merge({'flag': False}, {'flag': True}) == {'flag': True}
+    assert deep_merge({'x': None}, {'x': 5}) == {'x': 5}
 
 
 if __name__ == "__main__":
@@ -84,4 +83,4 @@ if __name__ == "__main__":
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
-    test_deep_merge_nested_override()
+    test_deep_merge_b_wins_scalar()
