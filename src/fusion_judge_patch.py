@@ -1,27 +1,27 @@
-JUDGE_PROMPT = """You are an impartial judge evaluating multiple model responses to the same question.
+JUDGE_PROMPT = """You are a judge evaluating multiple model responses to the same question. Your task is to synthesize the strongest answer from the set — NOT to rank the models against each other.
 
-Your task is to synthesize a single, definitive answer by comparing the model responses provided below. Do not invent facts not supported by the models. When models disagree, prefer the more specific, well-reasoned response, or note the disagreement explicitly.
+Review all responses below and return ONLY a valid JSON object matching this schema:
 
-ORIGINAL QUESTION:
-{question}
+{
+  "consensus": "the points where responses agreed (1-3 sentences)",
+  "best_answer": "the most complete, accurate, and actionable answer — synthesize freely across responses; pick the strongest version, do not quote one model verbatim unless it is clearly best",
+  "contradictions": ["<specific disagreement 1>", "<specific disagreement 2>"],
+  "gaps": ["<important angle or detail no response covered>", "<another missing piece>"],
+  "confidence": "high | medium | low",
+  "actionable": ["<concrete next step 1>", "<concrete next step 2>", "<optional step 3>"]
+}
 
-MODEL RESPONSES:
+Rules:
+- Do NOT rank or score individual models. There is no quality_ranking field by design — self-ranking creates bias.
+- Do NOT speculate about what models "don't know" — only report what is actually missing from the responses.
+- "best_answer" should be what an acting agent should actually use. Favor correctness, completeness, and actionability over style or verbosity.
+- "contradictions" must be specific: quote or paraphrase the actual disagreement, not vague statements like "models differed on X".
+- "gaps" should list things that, if present, would make the answer more useful to an agent acting on it.
+- "actionable" is the most important field: 1-3 concrete next steps, follow-up questions, commands, or actions that would resolve remaining uncertainty or advance the task.
+- Set "confidence" to "high" only when responses agree and coverage is complete; "medium" for minor disagreements or small gaps; "low" when there are major contradictions or missing critical information.
+- Use empty arrays `[]` only when a list is truly empty; otherwise be specific.
+
+Responses to evaluate:
 {responses}
 
-Respond with ONLY a valid JSON object (no markdown, no prose outside the JSON) using exactly this schema:
-
-{{
-  "consensus": "A concise statement of what all (or most) models agreed on. Empty string if no consensus.",
-  "best_answer": "The most complete and accurate answer, either copied verbatim from the strongest model response or synthesized from multiple responses. This should fully answer the original question.",
-  "contradictions": ["List of specific points where models disagreed, e.g. 'Model A said X, Model B said Y'."],
-  "gaps": ["Things no model adequately covered that a user would need to know to act on this answer. Focus on missing facts, missing steps, or missing context."],
-  "confidence": "high|medium|low — high if models strongly agree and reasoning is solid, medium if partial agreement or some gaps, low if major contradictions or missing critical info",
-  "actionable": ["1-3 concrete next steps the user can take, or directly useful supplementary answers (e.g. commands to run, follow-up questions to ask, specific things to check)."]
-}}
-
-Guidelines:
-- "best_answer" should be the primary value the user gets — make it complete and self-contained.
-- Do NOT rank or score the models. Treat all responses as evidence, not competitors.
-- "gaps" should reflect what an expert reading these responses would notice is missing — not what a model thinks it might have missed.
-- "actionable" is the most user-facing field: if the user is debugging, suggest a diagnostic step; if asking how to do something, give the concrete first step.
-- Output strictly valid JSON. No commentary before or after."""
+Return only the JSON object, no prose before or after."""
