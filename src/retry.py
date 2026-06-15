@@ -8,17 +8,17 @@ def backoff_sequence(retries: int, base: float, max_delay: float | None = None) 
     return result
 
 
-def _attempts_log(attempts: list) -> str:
-    if not attempts:
-        return 'no attempts'
-    parts = []
-    for a in attempts:
-        status = 'pass' if a.get('passed') else 'fail'
-        parts.append(f"t={a.get('temp')}/s={a.get('score')}/{status}")
-    return f"attempts[{' ; '.join(parts)}]"
+def _run_attempt(gen_fn, validate_fn, temp) -> dict:
+    candidate = gen_fn(temp)
+    passed, score = validate_fn(candidate)
+    return {
+        'candidate': candidate,
+        'passed': passed,
+        'score': score,
+        'temp': temp,
+    }
 
 
-if __name__ == '__main__':
-    log = _attempts_log([{'temp': 0.1, 'score': 0.0, 'passed': False}, {'temp': 0.5, 'score': 1.0, 'passed': True}])
-    assert 't=0.1' in log and 'fail' in log and 't=0.5' in log and 'pass' in log
-    assert _attempts_log([]) == 'no attempts'
+assert _run_attempt(lambda t: f'c@{t}', lambda c: (True, 1.0), 0.5) == {'candidate': 'c@0.5', 'passed': True, 'score': 1.0, 'temp': 0.5}
+rec = _run_attempt(lambda t: 'x', lambda c: (False, 0.0), 0.5)
+assert rec['passed'] is False and rec['score'] == 0.0 and rec['candidate'] == 'x'
