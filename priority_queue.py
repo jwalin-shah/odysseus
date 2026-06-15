@@ -20,7 +20,7 @@ class PriorityQueue:
         return self._queue[0][-1]
 
     def is_empty(self):
-        return len(self._queue) == 0
+        return not self._queue
 
     def size(self):
         return len(self._queue)
