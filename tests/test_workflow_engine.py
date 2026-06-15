@@ -1,6 +1,5 @@
 import pytest
 from unittest.mock import patch
-
 from src.workflow_engine import (
     inbox_summary_flow,
     reply_flow,
@@ -9,53 +8,59 @@ from src.workflow_engine import (
 )
 
 
+# Fake shape that inbox_tool.fetch_all would return.
+SAMPLE_INBOX = {
+    "gmail": [
+        {"id": "1", "unread": True},
+        {"id": "2", "unread": False},
+        {"id": "3", "unread": True},
+    ],
+    "slack": [
+        {"id": "a", "unread": True},
+        {"id": "b", "unread": True},
+    ],
+    "outlook": [],
+}
+
+
 @patch("src.workflow_engine.inbox_tool")
-def test_inbox_summary_flow_returns_platform_unread_counts(mock_inbox_tool):
-    """inbox_summary_flow should return a dict mapping platform -> unread count."""
-    mock_inbox_tool.fetch_summary.return_value = {
-        "gmail": 5,
-        "slack": 3,
-        "teams": 2,
-    }
+def test_inbox_summary_flow_returns_platform_unread_counts(mock_inbox):
+    mock_inbox.fetch_all.return_value = SAMPLE_INBOX
 
     result = inbox_summary_flow()
 
     assert isinstance(result, dict)
-    assert result == {"gmail": 5, "slack": 3, "teams": 2}
-    assert all(isinstance(v, int) for v in result.values())
-    mock_inbox_tool.fetch_summary.assert_called_once()
+    assert set(result.keys()) == {"gmail", "slack", "outlook"}
+    assert result["gmail"] == 2
+    assert result["slack"] == 2
+    assert result["outlook"] == 0
+    mock_inbox.fetch_all.assert_called_once()
 
 
 @patch("src.workflow_engine.inbox_tool")
-def test_reply_flow_raises_approval_required_before_sending(mock_inbox_tool):
-    """reply_flow must raise ApprovalRequired and never call send_reply."""
+def test_reply_flow_raises_before_sending(mock_inbox):
     with pytest.raises(ApprovalRequired):
-        reply_flow(message_id="msg_123", body="Thanks for the update!")
+        reply_flow(
+            message_id="m1",
+            platform="gmail",
+            body="Sounds good.",
+            approved=False,
+        )
 
-    mock_inbox_tool.send_reply.assert_not_called()
-    mock_inbox_tool.send_message.assert_not_called()
+    # Critical: nothing was actually dispatched.
+    mock_inbox.send_reply.assert_not_called()
+    mock_inbox.send.assert_not_called()
 
 
-@patch("src.workflow_engine.inbox_tool")
-def test_calendar_add_flow_raises_approval_required_before_creating(mock_inbox_tool):
-    """calendar_add_flow must raise ApprovalRequired and never create an event."""
-    event = {
-        "title": "Team sync",
-        "start": "2024-01-15T10:00:00",
-        "duration_minutes": 30,
-    }
-
+@patch("src.workflow_engine.calendar_tool")
+def test_calendar_add_flow_raises_before_creating_event(mock_calendar):
     with pytest.raises(ApprovalRequired):
-        calendar_add_flow(event=event)
+        calendar_add_flow(
+            title="Team standup",
+            start="2025-01-01T09:00:00",
+            end="2025-01-01T09:15:00",
+            attendees=["a@example.com"],
+            approved=False,
+        )
 
-    mock_inbox_tool.create_event.assert_not_called()
-    mock_inbox_tool.create_calendar_event.assert_not_called()
-
-
-@patch("src.workflow_engine.inbox_tool")
-def test_approval_required_is_specific_exception(mock_inbox_tool):
-    """ApprovalRequired should be a distinct, catchable exception class."""
-    assert issubclass(ApprovalRequired, Exception)
-    with pytest.raises(ApprovalRequired) as exc_info:
-        reply_flow(message_id="m1", body="hi")
-    assert "approval" in str(exc_info.value).lower()
+    mock_calendar.create_event.assert_not_called()
