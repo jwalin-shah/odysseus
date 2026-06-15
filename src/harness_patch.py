@@ -1,58 +1,61 @@
+# Add to the existing import block at the top of src/harness.py:
+#   import src.inbox_tool as inbox_tool
+# (No per-function imports needed for the writers — we look them up by name.)
+
+
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
     """If result.needs_approval and not confirmed, return it unchanged (caller shows approval UI).
-    If confirmed=True, execute the pending action and return the final result.
+    If confirmed=True, look up result.approval_payload["fn"] on src.inbox_tool, call it with the
+    remaining payload entries as kwargs, and return the final HarnessResult.
 
-    The approval payload is expected to look like:
-        {"platform": "imessage", "action": "send",
-         "to": "mom", "body": "...", "fn": "send_imessage"}
-
-    The value of ``fn`` is looked up by name on ``src.inbox_tool`` and invoked
-    with the remaining payload fields passed as keyword arguments.
+    Expected approval_payload shape (produced by route()):
+        {
+            "platform": "imessage" | "gmail" | "calendar" | ...,
+            "action":   "send" | "create" | "delete" | ...,
+            "fn":       "<inbox_tool function name>",   # e.g. "send_imessage"
+            # ...action-specific kwargs, e.g. "to", "body", "subject", "start", "end"
+        }
     """
-    # No approval gate active — nothing to confirm/execute; return result as-is.
-    if not result.needs_approval or not result.approval_payload:
-        return result
+    import src.inbox_tool as inbox_tool
 
-    # Approval required but the user hasn't confirmed yet — the caller is
-    # responsible for rendering the approval UI and re-invoking with confirmed=True.
+    # Fast path: nothing was gated, or caller hasn't decided yet.
+    if not result.needs_approval:
+        return result
     if not confirmed:
+        # Caller is responsible for rendering the approval UI from result.approval_payload.
         return result
 
-    # User approved — resolve the executor function from src.inbox_tool by name.
-    from src import inbox_tool
-
-    payload = result.approval_payload
+    payload = result.approval_payload or {}
     fn_name = payload.get("fn")
-    if not fn_name:
-        return HarnessResult(
-            content="Approval payload is missing the 'fn' field; cannot execute.",
-            action_taken="error",
-        )
+    if not isinstance(fn_name, str) or not fn_name:
+        result.content = "Approval payload is missing 'fn' (function name)."
+        result.action_taken = "error:no_fn"
+        return result
 
     fn = getattr(inbox_tool, fn_name, None)
     if fn is None or not callable(fn):
-        return HarnessResult(
-            content=f"Unknown action function '{fn_name}' in src.inbox_tool.",
-            action_taken="error",
-        )
+        result.content = f"Unknown inbox_tool function: {fn_name!r}"
+        result.action_taken = f"error:unknown_fn:{fn_name}"
+        return result
 
-    # Pass the remaining payload entries as kwargs. 'fn', 'action', and
-    # 'platform' are dispatch/metadata fields, not function arguments.
-    kwargs = {
-        k: v for k, v in payload.items()
-        if k not in ("fn", "action", "platform")
-    }
+    # Forward every payload key except the routing metadata as kwargs to the writer.
+    _METADATA_KEYS = ("fn", "action", "platform")
+    kwargs = {k: v for k, v in payload.items() if k not in _METADATA_KEYS}
 
     try:
-        executed = fn(**kwargs)
+        output = fn(**kwargs)
+    except TypeError as e:
+        # Most common cause: payload key names don't match the function's parameter names.
+        result.content = f"Bad arguments for {fn_name}: {e}"
+        result.action_taken = f"error:bad_args:{fn_name}"
+        return result
     except Exception as e:
-        return HarnessResult(
-            content=f"Failed to execute '{fn_name}': {e}",
-            action_taken="error",
-        )
+        result.content = f"{fn_name} failed: {e}"
+        result.action_taken = f"error:{fn_name}"
+        return result
 
-    return HarnessResult(
-        content=executed if isinstance(executed, str) else str(executed),
-        action_taken=payload.get("action", "execute"),
-        needs_approval=False,
-    )
+    # Success: close out the approval gate so the caller can serialize/finalize.
+    result.content = str(output) if output is not None else f"Executed {fn_name}."
+    result.action_taken = f"executed:{fn_name}"
+    result.needs_approval = False
+    return result
