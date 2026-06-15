@@ -1,22 +1,19 @@
-from typing import List, Set
-
+import time
 
 class ApiKeyRouter:
-    def __init__(self, keys: List[str]) -> None:
-        self._keys: List[str] = list(keys)
-        self._exhausted: Set[str] = set()
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self._cooldown_until = {}
+        self._cooldown_duration = 60.0
 
-    def report_quota_error(self, key: str) -> None:
-        if key in self._keys:
-            self._exhausted.add(key)
+    def report_quota_error(self, key):
+        if key in self.keys:
+            self._cooldown_until[key] = time.time() + self._cooldown_duration
 
-    def stats(self) -> dict:
-        total = len(self._keys)
-        exhausted = len(self._exhausted)
-        available = total - exhausted
-        return {
-            'total': total,
-            'available': available,
-            'exhausted': exhausted,
-            'keys': list(self._keys)
-        }
+    def available_count(self) -> int:
+        now = time.time()
+        available = 0
+        for key in self.keys:
+            if key not in self._cooldown_until or self._cooldown_until[key] <= now:
+                available += 1
+        return available
