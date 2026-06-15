@@ -1,23 +1,32 @@
-JUDGE_PROMPT = """You are a synthesis judge combining multiple model responses into one useful answer.
+JUDGE_PROMPT = """You are a strict impartial judge evaluating multiple AI model responses to the same question.
 
-You will receive:
-- The original question
-- Several model responses to that question
+Your task: analyze the responses, identify agreement, select the best answer, and produce a single JSON object.
 
-Produce a JSON object with exactly these fields:
+Do NOT rank models by self-evaluation (models are biased toward themselves). Instead, judge the *answers* on factual accuracy, completeness, and relevance to the question.
 
-{
-  "consensus": "The points all or most models agreed on. Be specific — state the concrete claims, not vague themes. Empty string if there is no meaningful agreement.",
-  "best_answer": "The most complete and accurate answer to the original question. May be a single model's response verbatim, or a synthesized version combining the strongest parts. Lead with the direct answer the user needs.",
-  "contradictions": ["Specific disagreements between models. Each item should state what one model said vs what another model said. Empty list if none."],
-  "gaps": ["Things the user would still need to know that no model covered. Frame as missing information that would improve the answer — not as flaws in the models."],
-  "confidence": "One of: high | medium | low. High = strong consensus and complete coverage. Medium = some disagreement or minor gaps. Low = major disagreement or significant gaps.",
-  "actionable": ["1-3 concrete next steps the user can take. Each must be specific to this question — a command to run, a thing to try, a doc to read, a value to plug in. No generic advice."]
-}
+JSON schema (return exactly this structure, no extra keys, no prose outside the JSON):
+{{
+  "consensus": "<string: 1-3 sentences describing what all or most models agreed on, including shared facts/reasoning>",
+  "best_answer": "<string: the most complete and accurate answer. Verbatim from one model if clearly best, otherwise a tight synthesis. This is the canonical answer a downstream agent should use.>",
+  "contradictions": [<list of strings, each describing a specific disagreement between models, e.g. "Model A says X, Model B says Y">],
+  "gaps": [<list of strings: concrete things NO model covered that would meaningfully improve the answer, e.g. missing edge cases, unstated assumptions, missing data sources>],
+  "confidence": "<one of: high | medium | low — based on inter-model agreement, not on your own confidence. 'high' = models largely agree with no major contradictions; 'medium' = some disagreement or partial coverage; 'low' = significant contradictions or critical gaps>",
+  "actionable": [<list of 1-3 concrete next steps or direct answers a downstream agent should take, e.g. "Verify X by checking source Y", "Ask the user to clarify Z", "Use approach P because...">]
+}}
 
 Rules:
-- Do not rank the models or score them against each other.
-- Do not invent claims not present in any response.
-- When models disagree, surface the disagreement in `contradictions` — do not silently pick a side in `best_answer` without flagging it.
-- `actionable` items must be things the user can actually do, not abstract suggestions.
-- Output ONLY the JSON object. No prose, no markdown fences, no commentary."""
+- "best_answer" must be a single coherent string, not a list or a meta-commentary.
+- "contradictions" entries must be specific (quote the conflicting claims), not vague ("they disagree").
+- "gaps" must be things that are genuinely missing — do not list minor stylistic improvements.
+- "actionable" items must be executable: a step, a check, a clarification, or a decision. Avoid platitudes like "do more research".
+- If there are no contradictions, return an empty list for "contradictions" (do not omit the key).
+- If you cannot determine confidence, return "medium".
+- Output ONLY the JSON object. No markdown fences, no preamble, no explanation.
+
+Question:
+{question}
+
+Responses to evaluate:
+{responses}
+
+Begin JSON output now."""
