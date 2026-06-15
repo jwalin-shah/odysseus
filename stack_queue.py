@@ -1,6 +1,20 @@
-class Stack:
+class _EmptyMixin:
+    """Provides a shared ``is_empty`` method that delegates to ``_is_empty``.
+
+    Subclasses must implement ``_is_empty`` to return ``True`` when the
+    data structure contains no items and ``False`` otherwise.
+    """
+
+    def is_empty(self):
+        return self._is_empty()
+
+
+class Stack(_EmptyMixin):
     def __init__(self):
         self._items = []
+
+    def _is_empty(self):
+        return len(self._items) == 0
 
     def push(self, item):
         self._items.append(item)
@@ -15,17 +29,17 @@ class Stack:
             raise IndexError("peek from empty stack")
         return self._items[-1]
 
-    def is_empty(self):
-        return len(self._items) == 0
-
     def size(self):
         return len(self._items)
 
 
-class Queue:
+class Queue(_EmptyMixin):
     def __init__(self):
         self._in_stack = Stack()
         self._out_stack = Stack()
+
+    def _is_empty(self):
+        return self._in_stack.is_empty()
 
     def enqueue(self, item):
         self._in_stack.push(item)
@@ -46,17 +60,17 @@ class Queue:
                 self._out_stack.push(self._in_stack.pop())
         return self._out_stack.peek()
 
-    def is_empty(self):
-        return self._in_stack.is_empty()
-
     def size(self):
         return self._in_stack.size() + self._out_stack.size()
 
 
-class MinStack:
+class MinStack(_EmptyMixin):
     def __init__(self):
         self._stack = Stack()
         self._min_stack = Stack()
+
+    def _is_empty(self):
+        return self._stack.is_empty()
 
     def push(self, item):
         self._stack.push(item)
@@ -80,9 +94,6 @@ class MinStack:
         if self._min_stack.is_empty():
             raise IndexError("get_min from empty MinStack")
         return self._min_stack.peek()
-
-    def is_empty(self):
-        return self._stack.is_empty()
 
     def size(self):
         return self._stack.size()
