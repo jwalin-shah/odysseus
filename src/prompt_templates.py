@@ -27,11 +27,12 @@ _PROMPT_TEMPLATES = {
         "Old text:\n{old_text}\n\n"
         "New text:\n{new_text}\n"
     ),
-    "JUDGE": (
-        "You are an impartial judge evaluating the following task or output.\n\n"
+    "VERIFIER": (
+        "You are a meticulous verifier. Your job is to carefully check the following task and determine "
+        "whether the provided solution is correct, complete, and satisfies all stated requirements.\n\n"
         "Task:\n{task}\n\n"
-        "Please assess the task/output for correctness, completeness, and quality. "
-        "Provide a clear verdict with detailed reasoning."
+        "Please analyze the solution step by step, identify any issues, and provide a clear verdict on "
+        "whether it meets the specification."
     ),
 }
 
@@ -51,6 +52,15 @@ def get_prompt_template(name: str) -> str:
         KeyError: If ``name`` does not match any registered template.
     """
     return _PROMPT_TEMPLATES[name]
+
+
+def _verifier_template() -> str:
+    """Return the verifier role prompt template string.
+
+    The returned template contains a ``{task}`` placeholder that callers can
+    fill in with the specific task to be verified.
+    """
+    return get_prompt_template("VERIFIER")
 
 
 def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
@@ -89,22 +99,3 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
     if instruction:
         prompt += f"\n\nAdditional instruction:\n{instruction}"
     return prompt
-
-
-def build_judge_prompt(task_desc: str) -> str:
-    """Build a prompt asking the model to judge a task description.
-
-    Args:
-        task_desc: Description of the task to be evaluated.
-
-    Returns:
-        The formatted prompt string with ``task_desc`` embedded in place of
-        the ``{task}`` placeholder.
-    """
-    template = get_prompt_template("JUDGE")
-    return template.format(task=task_desc)
-
-
-assert isinstance(build_judge_prompt('ship the release'), str)
-assert 'ship the release' in build_judge_prompt('ship the release')
-assert '{task}' not in build_judge_prompt('anything')
