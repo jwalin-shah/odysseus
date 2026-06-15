@@ -1,32 +1,51 @@
-def format_confirmation_prompt(action_summary: str, risk: str) -> str:
-    """Render a CLI prompt asking the user to approve, edit, or abort a write action.
-
-    The risk tier is highlighted visually so the operator can spot dangerous
-    actions at a glance. ANSI colour codes are used when the terminal is
-    likely to be interactive; the literal tier name (e.g. ``HIGH RISK``) is
-    also embedded so plain text consumers and tests can find it.
-    """
-    risk_normalized = (risk or "").strip().lower() or "unknown"
-    if risk_normalized == "high":
-        risk_display = "\033[1;41;97m  HIGH RISK  \033[0m"
-    elif risk_normalized == "medium":
-        risk_display = "\033[1;43;30m  MEDIUM RISK  \033[0m"
-    elif risk_normalized == "low":
-        risk_display = "\033[1;42;30m  LOW RISK  \033[0m"
-    else:
-        risk_display = f"  {risk_normalized.upper()} RISK  "
-
-    border = "-" * max(48, len(action_summary) + 16)
-    lines = [
-        "Pending write action",
-        border,
-        f"  Action : {action_summary}",
-        f"  Risk   : {risk_display}",
-        border,
-        "",
-        "Approve, edit, or abort this action? [y/n] ",
-    ]
+def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
+    lines = [f"Approve {action_name}?"]
+    for key, value in action_args.items():
+        lines.append(f"  {key}: {value}")
+    lines.append("[y/N] ")
     return "\n".join(lines)
+
+
+def summarize_write_intent(tool_name: str, args: dict) -> str:
+    """Produce a single human-readable sentence describing a write action.
+
+    Suitable for display in a confirmation prompt.
+    """
+    if not args:
+        return f"About to perform {tool_name}."
+
+    target_keys = {"path", "file", "filename", "target", "destination", "url"}
+    recipient_keys = {"to", "address", "recipient", "cc", "bcc"}
+    subject_keys = {"subject", "title"}
+    body_keys = {"body", "message", "content", "text", "data"}
+
+    remaining = set(args.keys())
+    ordered = []
+    for group in (target_keys, recipient_keys, subject_keys, body_keys):
+        for key in args:
+            if key in group and key in remaining:
+                ordered.append(key)
+                remaining.discard(key)
+    for key in args:
+        if key in remaining:
+            ordered.append(key)
+            remaining.discard(key)
+
+    parts = []
+    for key in ordered:
+        value = args[key]
+        if key in target_keys:
+            parts.append(f"to {key} {value!r}")
+        elif key in recipient_keys:
+            parts.append(f"to {value!r}")
+        elif key in subject_keys:
+            parts.append(f"with {key} {value!r}")
+        elif key in body_keys:
+            parts.append(f"with {key} {value!r}")
+        else:
+            parts.append(f"{key}={value!r}")
+
+    return f"About to call {tool_name} ({'; '.join(parts)})."
 
 
 _APPROVE_RESPONSES = frozenset({
