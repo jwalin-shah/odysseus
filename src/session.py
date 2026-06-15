@@ -13,18 +13,24 @@ class Session:
     max_history: int = 20
 
     def add(self, role: str, content: str) -> None:
+        """Append a message to conversation history and trim if over limit."""
         self.history.append({"role": role, "content": content})
         self.trim()
 
     def set_pending(self, payload: dict) -> None:
+        """Store a pending approval payload (e.g. tool call awaiting consent)."""
         self.pending_approval = payload
 
     def clear_pending(self) -> None:
+        """Clear any pending approval state."""
         self.pending_approval = None
 
-    def to_messages(self) -> list[dict]:  # for LLM context
+    def to_messages(self) -> list[dict]:
+        """Return a copy of history formatted for LLM context (role/content)."""
         return list(self.history)
 
-    def trim(self) -> None:  # keep last max_history turns
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+    def trim(self) -> None:
+        """Keep only the last max_history turns (a turn = user + assistant)."""
+        max_messages = self.max_history * 2
+        if len(self.history) > max_messages:
+            self.history = self.history[-max_messages:]
