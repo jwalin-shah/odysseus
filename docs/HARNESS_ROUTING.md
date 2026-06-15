@@ -1,5 +1,5 @@
-# HARNESS_ROUTING
+# Odysseus Request Routing
 
-How Odysseus turns a user message into an action.
+How a user message becomes an executed action.
 
 ## Flow
