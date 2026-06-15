@@ -48,3 +48,47 @@ def parse_trajectory_step(step: dict) -> tuple[str, int, int]:
         output_tokens = 0
 
     return (str(model_id), int(input_tokens), int(output_tokens))
+
+
+def aggregate_usage_by_model(steps: list) -> dict:
+    """Sum input/output token counts across steps, grouped by model name.
+
+    Each step is expected to expose `model`, `input_tokens`, and
+    `output_tokens` attributes (e.g. a SimpleNamespace, dataclass, or any
+    object with those names). Missing or None values are treated as zero.
+
+    Returns a dict mapping model name to a (total_input_tokens,
+    total_output_tokens) tuple. An empty input list yields an empty dict.
+    """
+    result: dict = {}
+    for step in steps:
+        model = getattr(step, "model", "") or ""
+        raw_in = getattr(step, "input_tokens", 0)
+        if raw_in is None:
+            input_tokens = 0
+        else:
+            try:
+                input_tokens = int(raw_in)
+            except (TypeError, ValueError):
+                input_tokens = 0
+        raw_out = getattr(step, "output_tokens", 0)
+        if raw_out is None:
+            output_tokens = 0
+        else:
+            try:
+                output_tokens = int(raw_out)
+            except (TypeError, ValueError):
+                output_tokens = 0
+        if model in result:
+            prev_in, prev_out = result[model]
+            result[model] = (prev_in + input_tokens, prev_out + output_tokens)
+        else:
+            result[model] = (input_tokens, output_tokens)
+    return result
+
+
+if __name__ == "__main__":
+    from types import SimpleNamespace
+    steps = [SimpleNamespace(model='gpt-4o', input_tokens=1000, output_tokens=500), SimpleNamespace(model='gpt-4o', input_tokens=2000, output_tokens=1000), SimpleNamespace(model='claude-3-5-sonnet', input_tokens=500, output_tokens=200)]
+    assert aggregate_usage_by_model(steps) == {'gpt-4o': (3000, 1500), 'claude-3-5-sonnet': (500, 200)}
+    assert aggregate_usage_by_model([]) == {}
