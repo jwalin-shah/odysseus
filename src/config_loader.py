@@ -1,5 +1,4 @@
 import copy
-import json
 import os
 
 
@@ -49,81 +48,28 @@ def _coerce_env_value(value: str) -> object:
     return value
 
 
-def _default_config() -> dict:
-    """Return the built-in default configuration dictionary."""
-    return {
-        "server": {
-            "host": "127.0.0.1",
-            "port": 8000,
-        },
-        "llm": {
-            "timeout": 60,
-            "model": "default",
-        },
-    }
-
-
-def _load_file_config(path: str) -> dict:
-    """Load a JSON config file; return an empty dict on any failure.
-
-    Missing files, unreadable files, and invalid JSON all degrade
-    gracefully to an empty dictionary so callers can still merge
-    defaults and environment overrides on top.
-    """
-    if not path:
-        return {}
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
 def _apply_env_overrides(config: dict, prefix: str) -> dict:
-    """Overlay OS environment variables onto ``config``.
+    """Apply environment variable overrides to a config dict.
 
-    Variables starting with ``prefix`` have the prefix stripped and
-    the remainder split on ``__`` to form a nested key path (e.g.
-    ``ODYSSEUS_SERVER__PORT=9999`` sets ``config["server"]["port"]``).
-    Values are coerced via :func:`_coerce_env_value` before being
-    assigned. The original ``config`` is not mutated.
+    Scans ``os.environ`` for variables beginning with ``prefix``. The
+    suffix after the prefix is interpreted as ``SECTION__KEY`` (split
+    on a double underscore) and the value is coerced via
+    :func:`_coerce_env_value`. The collected overrides are then
+    deep-merged into ``config`` using :func:`deep_merge` and the
+    merged result is returned.
     """
-    result = copy.deepcopy(config)
-    for env_key, env_value in os.environ.items():
-        if not env_key.startswith(prefix):
+    overrides: dict = {}
+    for env_name, env_value in os.environ.items():
+        if not env_name.startswith(prefix):
             continue
-        remainder = env_key[len(prefix):]
-        if not remainder:
+        remainder = env_name[len(prefix):]
+        parts = remainder.split("__")
+        if len(parts) != 2:
+            # Only the two-level SECTION__KEY form is supported.
             continue
-        key_path = remainder.lower().split("__")
-        coerced = _coerce_env_value(env_value)
-        current = result
-        for key in key_path[:-1]:
-            existing = current.get(key)
-            if not isinstance(existing, dict):
-                existing = {}
-                current[key] = existing
-            current = existing
-        current[key_path[-1]] = coerced
-    return result
-
-
-def load_config(path: str, env_prefix: str = "ODYSSEUS_") -> dict:
-    """Merge defaults, file config, and env overrides and return the result.
-
-    Precedence (lowest to highest): built-in defaults, JSON file at
-    ``path``, OS environment variables prefixed by ``env_prefix``.
-    """
-    config = _default_config()
-    file_config = _load_file_config(path)
-    config = deep_merge(config, file_config)
-    config = _apply_env_overrides(config, env_prefix)
-    return config
+        section, key = parts[0].lower(), parts[1].lower()
+        overrides.setdefault(section, {})[key] = _coerce_env_value(env_value)
+    return deep_merge(config, overrides)
 
 
 def test_deep_merge_non_dict_replace() -> None:
@@ -139,7 +85,3 @@ if __name__ == "__main__":
     assert _coerce_env_value('42') == 42
     assert _coerce_env_value('hello') == 'hello'
     test_deep_merge_non_dict_replace()
-    # Smoke test for load_config with a missing file path.
-    _smoke = load_config("/nonexistent/path/missing.json")
-    assert _smoke["server"]["host"] == "127.0.0.1"
-    assert _smoke["server"]["port"] == 8000
