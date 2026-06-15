@@ -1,39 +1,33 @@
-from typing import Dict
+def build_implement_fn_prompt(fn_signature: str, docstring: str, constraints: list[str]) -> str:
+    """Build the IMPLEMENT_FN prompt template.
 
-
-class PromptTemplate:
-    """A simple prompt template with a name and a template string."""
-
-    def __init__(self, name: str, template: str = "") -> None:
-        self.name = name
-        self.template = template
-
-    def __repr__(self) -> str:
-        return f"PromptTemplate(name={self.name!r})"
-
-
-_REGISTRY: Dict[str, PromptTemplate] = {
-    "IMPLEMENT_FN": PromptTemplate(
-        "IMPLEMENT_FN",
-        "Implement the following function.\n\nSignature:\n{function_signature}\n\nSpec:\n{spec}",
-    ),
-    "REVIEW": PromptTemplate(
-        "REVIEW",
-        "Review the following code for correctness, style, and edge cases:\n\n{code}",
-    ),
-}
-
-
-def get_template(name: str) -> PromptTemplate:
-    """Look up a registered prompt template by name.
-
-    Args:
-        name: The name of the prompt template to retrieve.
-
-    Returns:
-        The registered :class:`PromptTemplate` matching ``name``.
-
-    Raises:
-        KeyError: If no template is registered under ``name``.
+    Constructs a prompt instructing the model to implement a function
+    given its signature, docstring, and a list of constraints.
     """
-    return _REGISTRY[name]
+    constraints_section = ""
+    if constraints:
+        formatted_constraints = "\n".join(f"- {c}" for c in constraints)
+        constraints_section = (
+            "\n\nConstraints:\n"
+            f"{formatted_constraints}"
+        )
+
+    prompt = (
+        "You are an expert Python developer. Your task is to implement "
+        "the following function according to its signature, docstring, "
+        "and any provided constraints.\n\n"
+        "Function signature:\n"
+        f"{fn_signature}\n\n"
+        "Docstring:\n"
+        f"{docstring}"
+        f"{constraints_section}\n\n"
+        "Requirements:\n"
+        "1. Implement the function body so that it satisfies the docstring.\n"
+        "2. Adhere strictly to all stated constraints.\n"
+        "3. Use only the Python standard library unless a constraint says otherwise.\n"
+        "4. Return ONLY the complete function definition (including the "
+        "signature line) with no additional commentary, explanation, or "
+        "markdown formatting.\n\n"
+        "Implementation:"
+    )
+    return prompt
