@@ -261,9 +261,6 @@ def test_scheduled_poller_resolves_config_with_row_owner(tmp_path, monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def append(self, folder, flags, date_time, message):
-            calls.append(("append", folder))
-
     monkeypatch.setattr(email_pollers, "_get_email_config", fake_get_email_config)
     monkeypatch.setattr(email_pollers, "_send_smtp_message", lambda *args, **kwargs: calls.append(("send", args[1], args[2])))
     monkeypatch.setattr(email_pollers, "_imap", FakeImap)
@@ -275,3 +272,77 @@ def test_scheduled_poller_resolves_config_with_row_owner(tmp_path, monkeypatch):
     assert result == {"sent": ["sched-1"], "failed": []}
     assert ("config", "acct-alice", "alice") in calls
     assert ("imap", "acct-alice", "alice") in calls
+
+
+def test_scheduled_poller_does_not_invoke_imap_append(tmp_path, monkeypatch):
+    """The scheduled poller must not call ``imap.append`` while resolving
+    owner-scoped config and dispatching SMTP. Verify by using a tracking
+    fake IMAP that records any ``append`` invocation, then assert none
+    occurred during the poll.
+    """
+    import routes.email_helpers as email_helpers
+    import routes.email_pollers as email_pollers
+
+    db_path = tmp_path / "scheduled_emails.db"
+    monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
+    monkeypatch.setattr(email_pollers, "SCHEDULED_DB", db_path)
+    email_helpers._init_scheduled_db()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO scheduled_emails
+        (id, to_addr, subject, body, attachments, send_at, created_at, status, account_id, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            "sched-no-append",
+            "recipient@example.com",
+            "Subject",
+            "Body",
+            "[]",
+            "2000-01-01T00:00:00",
+            "1999-12-31T00:00:00",
+            "acct-alice",
+            "alice",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    imap_calls = []
+
+    class TrackingImap:
+        def __init__(self, account_id=None, owner=""):
+            imap_calls.append(("init", account_id, owner))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def append(self, folder, flags, date_time, message):
+            imap_calls.append(("append", folder))
+
+    def fake_get_email_config(account_id=None, owner=""):
+        return {
+            "from_address": "alice@example.com",
+            "smtp_host": "smtp.example.com",
+            "smtp_user": "alice@example.com",
+            "smtp_password": "secret",
+        }
+
+    monkeypatch.setattr(email_pollers, "_get_email_config", fake_get_email_config)
+    monkeypatch.setattr(email_pollers, "_send_smtp_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(email_pollers, "_imap", TrackingImap)
+    monkeypatch.setattr(email_pollers, "_detect_sent_folder", lambda imap: "Sent")
+    monkeypatch.setattr(email_pollers, "_cleanup_compose_uploads", lambda attachments: None)
+
+    result = email_pollers._scheduled_poll_once()
+
+    assert result == {"sent": ["sched-no-append"], "failed": []}
+    assert ("init", "acct-alice", "alice") in imap_calls
+    assert not any(call[0] == "append" for call in imap_calls), (
+        f"imap.append was unexpectedly invoked during owner-scoped resolution: {imap_calls}"
+    )
