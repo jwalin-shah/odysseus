@@ -28,7 +28,28 @@ _PROMPT_TEMPLATES = {
         "Replace text:\n{replace_text}\n\n"
         "Replace {scope} of the search text with the replace text.\n"
     ),
+    "REFACTOR": (
+        "You are a senior software engineer tasked with refactoring code to improve its quality.\n\n"
+        "Please refactor the following code to improve:\n"
+        "- Readability and clarity\n"
+        "- Modularity and reusability\n"
+        "- Performance where applicable\n"
+        "- Adherence to best practices and idioms\n\n"
+        "Code to refactor:\n{code}\n\n"
+        "Constraints:\n{constraints}\n\n"
+        "Provide the refactored code along with a brief explanation of the changes made."
+    ),
 }
+
+
+def list_prompt_templates() -> list:
+    """Return the list of registered prompt template names.
+
+    Returns:
+        A list of strings, where each string is the name of a registered
+        prompt template that can be passed to :func:`get_prompt_template`.
+    """
+    return list(_PROMPT_TEMPLATES.keys())
 
 
 def get_prompt_template(name: str) -> str:
