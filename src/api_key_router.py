@@ -1,13 +1,20 @@
+from typing import Optional, List
+
+
 class ApiKeyRouter:
-    def __init__(self, keys):
-        self._keys = list(keys)
-        self._exhausted = set()
+    def __init__(self, keys: Optional[List[str]] = None) -> None:
+        self._keys = list(keys) if keys is not None else []
+        self._index = 0
+        self._quota_exceeded = set()
 
     def mark_quota_error(self, key: str) -> None:
-        self._exhausted.add(key)
+        self._quota_exceeded.add(key)
 
     def available_keys(self) -> list:
-        return [k for k in self._keys if k not in self._exhausted]
+        return [k for k in self._keys if k not in self._quota_exceeded]
+
+    def is_available(self, key: str) -> bool:
+        return key in self._keys and key not in self._quota_exceeded
 
     def is_quota_error(self, exc: BaseException) -> bool:
         message = str(exc).lower()
@@ -15,6 +22,17 @@ class ApiKeyRouter:
 
 
 if __name__ == "__main__":
+    # Spec tests
+    r = ApiKeyRouter(["a", "b", "c"])
+    assert r._keys == ["a", "b", "c"] and r._index == 0
+
+    r = ApiKeyRouter()
+    assert r._keys == [] and r._quota_exceeded == set()
+
+    r = ApiKeyRouter(["x"])
+    assert r.is_available("x") is True
+
+    # Existing tests
     r = ApiKeyRouter([])
     assert r.is_quota_error(Exception('quota exceeded')) == True
     r = ApiKeyRouter([])
