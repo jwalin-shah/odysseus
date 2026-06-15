@@ -50,55 +50,57 @@ def parse_trajectory_step(step: dict) -> tuple[str, int, int]:
     return (str(model_id), int(input_tokens), int(output_tokens))
 
 
-# Per-1k-token USD pricing for known models.
-# Source: published list prices from OpenAI and Anthropic (USD per 1M tokens
-# divided by 1000). Update when vendors change rates.
-_MODEL_PRICING: dict = {
+# Per-1M-token USD pricing for known models: (input_price, output_price).
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
     # OpenAI
-    "gpt-4o": {"input_per_1k": 0.0025, "output_per_1k": 0.01},
-    "gpt-4o-mini": {"input_per_1k": 0.00015, "output_per_1k": 0.0006},
-    "gpt-4-turbo": {"input_per_1k": 0.01, "output_per_1k": 0.03},
-    "gpt-4": {"input_per_1k": 0.03, "output_per_1k": 0.06},
-    "gpt-3.5-turbo": {"input_per_1k": 0.0005, "output_per_1k": 0.0015},
-    "o1": {"input_per_1k": 0.015, "output_per_1k": 0.06},
-    "o1-mini": {"input_per_1k": 0.003, "output_per_1k": 0.012},
-    "o3-mini": {"input_per_1k": 0.0011, "output_per_1k": 0.0044},
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-4": (30.00, 60.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    "o1": (15.00, 60.00),
+    "o1-mini": (3.00, 12.00),
+    "o1-preview": (15.00, 60.00),
     # Anthropic
-    "claude-3-5-sonnet": {"input_per_1k": 0.003, "output_per_1k": 0.015},
-    "claude-3-5-haiku": {"input_per_1k": 0.0008, "output_per_1k": 0.004},
-    "claude-3-opus": {"input_per_1k": 0.015, "output_per_1k": 0.075},
-    "claude-3-sonnet": {"input_per_1k": 0.003, "output_per_1k": 0.015},
-    "claude-3-haiku": {"input_per_1k": 0.00025, "output_per_1k": 0.00125},
+    "claude-3-5-sonnet": (3.00, 15.00),
+    "claude-3-5-haiku": (0.80, 4.00),
+    "claude-3-opus": (15.00, 75.00),
+    "claude-3-sonnet": (3.00, 15.00),
+    "claude-3-haiku": (0.25, 1.25),
+    "claude-sonnet-4": (3.00, 15.00),
+    "claude-opus-4": (15.00, 75.00),
+    "claude-haiku-4": (0.80, 4.00),
     # DeepSeek
-    "deepseek-chat": {"input_per_1k": 0.00027, "output_per_1k": 0.0011},
-    "deepseek-reasoner": {"input_per_1k": 0.00055, "output_per_1k": 0.00219},
-    # Google Gemini
-    "gemini-1.5-pro": {"input_per_1k": 0.00125, "output_per_1k": 0.005},
-    "gemini-1.5-flash": {"input_per_1k": 0.000075, "output_per_1k": 0.0003},
+    "deepseek-chat": (0.27, 1.10),
+    "deepseek-reasoner": (0.55, 2.19),
+    # Google
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-2.0-flash": (0.10, 0.40),
 }
 
-# Conservative fallback for unknown / custom / locally-served models.
-# Estimating on the cheap side keeps total-cost dashboards from over-reporting.
-_DEFAULT_PRICING: dict = {"input_per_1k": 0.001, "output_per_1k": 0.002}
 
+def get_model_pricing(model: str) -> tuple[float, float]:
+    """Return (input_price_per_1m, output_price_per_1m) in USD for ``model``.
 
-def get_model_pricing(model_name: str) -> dict:
-    """Return per-1k-token USD pricing for a model.
-
-    Looks up ``model_name`` in the known-model table. Falls back to a
-    conservative default for unknown models so downstream cost
-    estimation never crashes on a new provider.
-
-    Returns a dict with two keys: ``input_per_1k`` and ``output_per_1k``.
+    Unknown models return ``(0.0, 0.0)`` so downstream cost calculation
+    degrades to zero rather than raising.
     """
-    pricing = _MODEL_PRICING.get(model_name)
-    if pricing is None:
-        return {"input_per_1k": _DEFAULT_PRICING["input_per_1k"],
-                "output_per_1k": _DEFAULT_PRICING["output_per_1k"]}
-    return {"input_per_1k": pricing["input_per_1k"],
-            "output_per_1k": pricing["output_per_1k"]}
+    return _MODEL_PRICING.get(model, (0.0, 0.0))
 
 
-assert get_model_pricing('gpt-4o') == {'input_per_1k': 0.0025, 'output_per_1k': 0.01}
-assert get_model_pricing('claude-3-5-sonnet')['output_per_1k'] == 0.015
-assert set(get_model_pricing('unknown-model-xyz').keys()) == {'input_per_1k', 'output_per_1k'}
+def calculate_model_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Compute the USD cost for the given token counts of a single model.
+
+    Uses :func:`get_model_pricing` for per-1M-token rates and rounds the
+    result to 6 decimal places.
+    """
+    input_price, output_price = get_model_pricing(model)
+    cost = (input_tokens * input_price + output_tokens * output_price) / 1_000_000
+    return round(cost, 6)
+
+
+if __name__ == "__main__":
+    assert calculate_model_cost('gpt-4o', 1000, 500) == 0.0075
+    assert calculate_model_cost('claude-3-5-sonnet', 500, 200) == 0.0045
+    assert calculate_model_cost('gpt-4o', 0, 0) == 0.0
