@@ -1,19 +1,14 @@
+import hashlib
 import json
-import os
 
 
-def load_seen_hashes(path: str = 'data/inbox_seen.json') -> set:
-    """Load the set of previously seen message hashes from a JSON file.
+def compute_message_hash(message: dict) -> str:
+    """Compute a deterministic SHA-256 hash for a message dictionary."""
+    # Serialize the message to a JSON string with sorted keys for determinism
+    message_str = json.dumps(message, sort_keys=True, default=str)
+    return hashlib.sha256(message_str.encode('utf-8')).hexdigest()
 
-    Returns an empty set if the file is missing or contains invalid JSON.
-    """
-    if not os.path.exists(path):
-        return set()
-    try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        return set()
-    if not isinstance(data, (list, set, tuple)):
-        return set()
-    return set(data)
+
+def filter_new_messages(messages: list, seen_hashes: set) -> list:
+    """Return only the messages whose computed hash is not present in the seen_hashes set."""
+    return [msg for msg in messages if compute_message_hash(msg) not in seen_hashes]
