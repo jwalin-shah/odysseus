@@ -1,105 +1,53 @@
-# New module-level constants — add these next to the existing _CONTACT_RE.
+# --- Add these module-level definitions near the existing _CONTACT_RE ---
 
-# Fallback pattern: any single capitalized word (2–16 chars).
-# Used when the text has no "to/from/with <Name>" prepositional match.
-_BARE_NAME_RE = re.compile(r"\b([A-Z][a-z]{1,15})\b")
+_BARE_NAME_RE = re.compile(r'\b([A-Z][a-z]{1,15})\b')
 
-# Platform / service / product names that must never be matched as a
-# contact.  Compared case-insensitively against w.lower().
+# Merge with your existing platform words; this is a reasonable default set.
 _SKIP_WORDS = {
-    # Messaging / chat
-    "imessage", "message", "messenger", "whatsapp", "signal", "telegram",
-    "slack", "teams", "discord", "skype", "zoom", "wechat", "line",
-    "snapchat", "twitter", "facebook", "instagram", "tiktok", "reddit",
-    "linkedin", "youtube", "pinterest", "hangouts",
-    # Email / calendar
-    "gmail", "email", "mail", "outlook", "yahoo", "inbox", "calendar",
-    # OS / vendor
-    "google", "apple", "microsoft", "samsung", "android", "iphone",
-    # Generic "send a ..." words
-    "sms", "text", "phone", "call", "voicemail", "note", "reminder",
-    # Defensive fragments of CamelCase product names
-    "app", "web", "chat", "book", "docs", "drive",
+    'imessage', 'whatsapp', 'gmail', 'slack', 'teams', 'discord',
+    'telegram', 'signal', 'sms', 'facebook', 'instagram', 'twitter',
+    'linkedin', 'email', 'text', 'message', 'dm', 'chat', 'phone',
+    'call', 'video', 'snapchat', 'messenger', 'wechat', 'line',
+    'viber', 'skype', 'zoom', 'google', 'apple', 'microsoft',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+    'saturday', 'sunday', 'january', 'february', 'march', 'april',
+    'may', 'june', 'july', 'august', 'september', 'october',
+    'november', 'december',
 }
 
+_STOP_WORDS = frozenset({
+    'The', 'A', 'An', 'I', 'My', 'What', 'Who', 'When', 'Where',
+    'How', 'Did', 'Does', 'Didn', 'Isn', 'Was', 'Were', 'Is', 'Are',
+    'Am', 'Have', 'Has', 'Had', 'Do', 'Don', 'Can', 'Could', 'Would',
+    'Should', 'Will', 'Won', 'Tell', 'Show', 'Send', 'Give', 'Get',
+    'Make', 'Let', 'Put', 'Say', 'Said', 'Told', 'Ask',
+    'Want', 'Need', 'Like', 'Love', 'Know', 'Think', 'See', 'Look',
+    'Find', 'Use', 'Go', 'Come', 'Take', 'Bring', 'Keep', 'Leave',
+    'Yesterday', 'Today', 'Tomorrow', 'Now', 'Then', 'Here', 'There',
+})
 
-# Updated function — replace the existing _extract_contact with this.
 
-def _extract_contact(text: str) -> Optional[str]:
-    """Return the most likely contact name in *text*, or None.
+# --- Updated function (replaces the existing _extract_contact) ---
 
-    Strategy
-    --------
-    1. Try a prepositional match first:  ``to Sarah``, ``from John``,
-       ``with Alex``, ``at Megan`` — handled by the existing
-       ``_CONTACT_RE`` regex.
-    2. If that fails, scan for any capitalized token that is neither a
-       known platform / service name nor a common English word.  This
-       catches queries like ``"what did Sarah say"`` where the name
-       appears without an introducing preposition.
+def _extract_contact(text):
+    """Extract a contact name from free-form text.
+
+    First tries a prepositional match (e.g. "to Sarah", "from John").
+    Falls back to any capitalized token that isn't a platform name
+    or a common English stop word.
     """
-    # 1. Prepositional match: "to Sarah", "from John", "with Alex" ...
+    # 1. Prepositional match: "to/from/with <Name>"
     m = _CONTACT_RE.search(text)
     if m:
         return m.group(1)
 
-    # 2. Fallback: bare capitalized name anywhere in the text.
-    for match in _BARE_NAME_RE.finditer(text):
-        w = match.group(1)
-
-        # Platform / service names — never a contact.
+    # 2. Fallback: bare capitalized name anywhere in the text
+    for m in _BARE_NAME_RE.finditer(text):
+        w = m.group(1)
         if w.lower() in _SKIP_WORDS:
             continue
-
-        # Sentence-initial, question, pronoun, and function words.
-        if w in (
-            # Articles / determiners
-            "The", "A", "An", "My", "This", "That", "These", "Those",
-            "Some", "Any", "No", "All", "Each", "Every", "Both",
-            # Pronouns
-            "I", "You", "He", "She", "It", "We", "They",
-            "Me", "Him", "Her", "Us", "Them",
-            "My", "Your", "His", "Her", "Its", "Our", "Their",
-            "Mine", "Yours", "Hers", "Ours", "Theirs",
-            # Question / wh-words
-            "What", "Who", "Whom", "Whose", "Which",
-            "When", "Where", "Why", "How",
-            # Auxiliaries & modals
-            "Do", "Does", "Did", "Done",
-            "Have", "Has", "Had", "Having",
-            "Be", "Am", "Is", "Are", "Was", "Were", "Been", "Being",
-            "Will", "Would", "Shall", "Should",
-            "Can", "Could", "May", "Might", "Must",
-            # Common sentence-initial verbs
-            "Say", "Said", "Tell", "Told", "Ask", "Asked",
-            "Get", "Got", "Go", "Going", "Gone",
-            "Want", "Wanted", "Need", "Needed", "Like", "Liked",
-            "Make", "Made", "Take", "Took", "Give", "Gave",
-            "See", "Saw", "Know", "Knew", "Think", "Thought",
-            "Let", "Put", "Set", "Run", "Keep", "Find", "Found",
-            # Prepositions / conjunctions
-            "In", "On", "At", "To", "From", "With", "By", "For",
-            "Of", "Off", "Out", "Over", "Under", "Into", "Onto",
-            "About", "After", "Before", "Above", "Below", "Through",
-            "During", "Since", "Until", "While", "Between", "Among",
-            "And", "Or", "But", "Nor", "Yet", "So", "If", "As",
-            "Because", "Although", "Though", "Unless", "Whether",
-            # Adverbs / fillers
-            "Just", "Also", "Then", "Now", "Still", "Already",
-            "Yet", "Only", "Even", "Too", "Very", "Really", "Quite",
-            "Here", "There", "Today", "Tomorrow", "Yesterday",
-            "Please", "Thanks", "Sorry", "Hello", "Hi", "Hey",
-            "Yes", "No", "Okay", "Ok",
-        ):
+        if w in _STOP_WORDS:
             continue
-
-        # CamelCase fragment guard: skip if the character right after
-        # the match is uppercase or a digit — e.g. "App" inside
-        # "WhatsApp", or "Web" inside "WebApp".
-        end = match.end()
-        if end < len(text) and (text[end].isupper() or text[end].isdigit()):
-            continue
-
         return w
 
     return None
