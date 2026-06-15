@@ -1,27 +1,27 @@
-import hashlib
 import json
+import os
+import tempfile
 
 
-def fingerprint_message(message: dict) -> str:
-    """Compute a deterministic fingerprint for a message dict."""
-    encoded = json.dumps(message, sort_keys=True, default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+def save_sync_state(path: str, seen_hashes: set) -> None:
+    """Atomically write a JSON-encoded set of seen message fingerprints to disk.
 
-
-def filter_new(messages: list, seen_hashes: set) -> tuple:
-    """Partition messages into (new_messages, updated_seen_hashes).
-
-    Excludes any message whose fingerprint is already present in
-    ``seen_hashes``. ``updated_seen_hashes`` is the union of the input
-    set and the fingerprints of the new messages.
+    Creates parent directories as needed.
     """
-    new_messages = []
-    updated_seen_hashes = set(seen_hashes)
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
 
-    for message in messages:
-        fp = fingerprint_message(message)
-        if fp not in seen_hashes:
-            new_messages.append(message)
-            updated_seen_hashes.add(fp)
-
-    return (new_messages, updated_seen_hashes)
+    # Use mkstemp to get a secure temp file in the same directory
+    # so that os.replace is an atomic operation on the same filesystem.
+    fd, tmp_path = tempfile.mkstemp(dir=parent_dir or ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(list(seen_hashes), f)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
