@@ -8,13 +8,17 @@ def backoff_sequence(retries: int, base: float, max_delay: float | None = None) 
     return result
 
 
-def _first_passing(attempts: list) -> dict:
-    for attempt in attempts:
-        if attempt.get('passed') is True:
-            return attempt
-    return None
+def _attempts_log(attempts: list) -> str:
+    if not attempts:
+        return 'no attempts'
+    parts = []
+    for a in attempts:
+        status = 'pass' if a.get('passed') else 'fail'
+        parts.append(f"t={a.get('temp')}/s={a.get('score')}/{status}")
+    return f"attempts[{' ; '.join(parts)}]"
 
 
-assert _first_passing([{'passed': False}, {'passed': True}, {'passed': True}])['passed'] is True
-assert _first_passing([{'passed': False}, {'passed': False}]) is None
-assert _first_passing([]) is None
+if __name__ == '__main__':
+    log = _attempts_log([{'temp': 0.1, 'score': 0.0, 'passed': False}, {'temp': 0.5, 'score': 1.0, 'passed': True}])
+    assert 't=0.1' in log and 'fail' in log and 't=0.5' in log and 'pass' in log
+    assert _attempts_log([]) == 'no attempts'
