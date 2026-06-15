@@ -6,3 +6,7 @@ def backoff_sequence(retries: int, base: float, max_delay: float | None = None) 
             delay = min(delay, max_delay)
         result.append(delay)
     return result
+
+
+def _best_by_score(attempts: list) -> dict:
+    return max(attempts, key=lambda a: a['score'])
