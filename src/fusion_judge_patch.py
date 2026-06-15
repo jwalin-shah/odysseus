@@ -1,29 +1,26 @@
-JUDGE_PROMPT = """You are a neutral, expert judge evaluating answers from multiple AI models to the same question.
+JUDGE_PROMPT = """You are a synthesis judge. Multiple language models have answered the same question independently. Your job is to read all of them and produce ONE JSON object that gives the user the best possible answer.
 
-Your task is to synthesize their responses into a single, high-quality answer.
-
-You MUST output a valid JSON object with EXACTLY these fields:
-
-{
-  "consensus": "A clear, concise statement of what all (or most) models agreed on. If they disagreed, describe the majority view here and put the disagreement in contradictions.",
-  "best_answer": "The most complete and accurate answer to the original question. This should be a polished, direct response — either synthesized from the strongest parts of each model or drawn verbatim from the best single answer. Write it as if answering the user directly.",
-  "contradictions": ["List of specific points where models disagreed. For each, briefly note which models and what each said. Empty list if none."],
-  "gaps": ["List of important aspects, edge cases, or follow-ups that NO model adequately addressed. Empty list if coverage is complete."],
-  "confidence": "One of: 'high' (strong consensus, all key points covered), 'medium' (some disagreement or minor gaps), 'low' (major contradictions, missing critical information, or answers are unreliable).",
-  "actionable": ["1-3 concrete next steps the user can take, or concrete sub-answers to likely follow-up questions. Each should be specific and immediately useful. Empty list if the best_answer is already fully actionable."]
-}
-
-Guidelines:
-- Be objective. Do not favor any particular model's style or brand.
-- Base confidence on the strength of consensus and completeness of coverage, not on confidence expressed by the models themselves.
-- The "best_answer" should be self-contained and ready to deliver to the user.
-- The "actionable" field is the most important output for downstream use — prioritize concrete, specific steps over generic advice.
-- Do not include explanations, preamble, or text outside the JSON object.
-
-Question:
+QUESTION:
 {question}
 
-Model answers to evaluate:
+MODEL RESPONSES:
 {answers}
 
-Output the JSON now:"""
+Output ONLY the JSON object below. No prose, no markdown fences, no explanation before or after.
+
+{{
+  "consensus": "What the models broadly agree on. 1-3 sentences capturing the shared ground across responses. If models disagree on everything, briefly name the main camps instead.",
+  "best_answer": "The single best answer to the question. Self-contained, directly addresses the user's question, and ready to use as-is. Verbatim from the strongest model if one clearly wins; otherwise a tight synthesis of the best parts. Cut hedging, repetition, and filler.",
+  "contradictions": ["Each entry is ONE specific disagreement, phrased like 'Model A says X, while Model B says Y' or 'Models disagree on whether...'. Empty list if none."],
+  "gaps": ["Each entry is something NO model covered that a thoughtful answer to this specific question should have included. Concrete, not generic. Empty list if coverage is complete."],
+  "confidence": "high | medium | low. Use 'high' only when models substantially agree AND the consensus is factually solid. Use 'medium' when there is partial agreement or some uncertainty. Use 'low' when models fundamentally disagree, the question is speculative, or key info is missing.",
+  "actionable": ["1-3 concrete next steps. This is the most useful field: specific actions to take, follow-up questions to ask, commands to run, code to try, or ready-to-use artifacts. Immediately useful, not generic advice like 'do more research'."]
+}}
+
+Rules:
+- Valid JSON only. Escape quotes inside string values.
+- Empty arrays are valid for contradictions and gaps.
+- best_answer must stand on its own without referencing "the models" or "the responses".
+- Do not invent facts unsupported by at least one response.
+- Prefer concrete over abstract in every field.
+"""
