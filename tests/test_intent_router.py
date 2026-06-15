@@ -36,6 +36,17 @@ from src.intent_router import classify
                 "platform": "code",
             },
         ),
+        pytest.param(
+            "what did Sarah say on WhatsApp",
+            {
+                "platform": "whatsapp",
+                "contact": "Sarah",
+            },
+            marks=pytest.mark.xfail(
+                reason="WhatsApp platform detection pending patch",
+                strict=False,
+            ),
+        ),
         (
             "show my LinkedIn DMs",
             {
@@ -49,43 +60,42 @@ from src.intent_router import classify
         "gmail_email_john",
         "calendar_create_tuesday",
         "code_fix_bug",
+        "whatsapp_sarah_xfail_until_patch",
         "linkedin_read_dms",
     ],
 )
-def test_classify_expected_fields(text, expected):
-    """classify() should return at least the expected fields for each input."""
+def test_classify_returns_expected_fields(text, expected):
+    """classify() should extract the expected fields for each prompt."""
     result = classify(text)
 
-    assert isinstance(result, dict), f"classify() must return a dict, got {type(result)!r}"
+    # classify() is expected to return a mapping-like object (e.g. dict).
+    assert isinstance(result, dict), (
+        f"classify({text!r}) must return a dict-like mapping, got {type(result).__name__}"
+    )
 
     for key, value in expected.items():
-        assert key in result, f"Missing key {key!r} in result {result!r}"
-
-        if key == "time_info":
-            assert isinstance(result[key], dict), (
-                f"time_info must be a dict, got {type(result[key])!r}"
+        if isinstance(value, dict):
+            # Nested structure (e.g. time_info): assert the sub-keys individually.
+            assert key in result, (
+                f"For {text!r}: expected key {key!r} in result, got keys {list(result)}"
             )
-            assert result[key].get("day") == value["day"], (
-                f"Expected time_info.day == {value['day']!r}, "
-                f"got {result[key].get('day')!r}"
+            nested = result[key]
+            assert isinstance(nested, dict), (
+                f"For {text!r}: expected {key!r} to be a dict, got {type(nested).__name__}"
             )
+            for sub_key, sub_value in value.items():
+                assert nested.get(sub_key) == sub_value, (
+                    f"For {text!r}: expected {key}.{sub_key}={sub_value!r}, "
+                    f"got {nested.get(sub_key)!r}"
+                )
         else:
-            assert result[key] == value, (
-                f"Expected {key} == {value!r}, got {result.get(key)!r}"
+            assert result.get(key) == value, (
+                f"For {text!r}: expected {key}={value!r}, got {result.get(key)!r}"
             )
 
 
-@pytest.mark.xfail(
-    reason="WhatsApp platform detection pending upstream patch",
-    strict=False,
-)
-def test_classify_whatsapp_sarah():
-    """Pending patch: classify() should detect WhatsApp and extract contact 'Sarah'."""
-    result = classify("what did Sarah say on WhatsApp")
-
-    assert result.get("platform") == "whatsapp", (
-        f"Expected platform 'whatsapp', got {result.get('platform')!r}"
-    )
-    assert result.get("contact") == "Sarah", (
-        f"Expected contact 'Sarah', got {result.get('contact')!r}"
-    )
+def test_classify_returns_dict():
+    """Smoke test: classify() returns a dict for any non-empty string."""
+    result = classify("hello world")
+    assert isinstance(result, dict)
+    assert "platform" in result
