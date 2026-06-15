@@ -1,11 +1,16 @@
-def available_keys(state: dict, keys: list[dict], now: float) -> list[dict]:
-    """Return the subset of keys whose cooldown has expired or which were never marked exhausted.
+from typing import List
+from dataclasses import dataclass, field
 
-    If any tracked key in the state is currently within its cooldown window (now < exhausted_until),
-    no keys are considered available. Otherwise, all provided keys are returned as available.
-    """
-    for key_state in state.values():
-        exhausted_until = key_state.get("exhausted_until")
-        if exhausted_until is not None and now < exhausted_until:
-            return []
-    return list(keys)
+
+@dataclass
+class ApiKeyState:
+    key: str
+    status: str = 'available'
+    cooldown_until: float = 0.0
+
+
+class ApiKeyRouter:
+    def __init__(self, keys: List[str], cooldown_seconds: int = 60) -> None:
+        self._states: List[ApiKeyState] = [ApiKeyState(key=k) for k in keys]
+        self._cursor: int = 0
+        self._cooldown_seconds: int = cooldown_seconds
