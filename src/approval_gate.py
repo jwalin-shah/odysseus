@@ -6,6 +6,48 @@ def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
     return "\n".join(lines)
 
 
+def summarize_write_intent(tool_name: str, args: dict) -> str:
+    """Produce a single human-readable sentence describing a write action.
+
+    Suitable for display in a confirmation prompt.
+    """
+    if not args:
+        return f"About to perform {tool_name}."
+
+    target_keys = {"path", "file", "filename", "target", "destination", "url"}
+    recipient_keys = {"to", "address", "recipient", "cc", "bcc"}
+    subject_keys = {"subject", "title"}
+    body_keys = {"body", "message", "content", "text", "data"}
+
+    remaining = set(args.keys())
+    ordered = []
+    for group in (target_keys, recipient_keys, subject_keys, body_keys):
+        for key in args:
+            if key in group and key in remaining:
+                ordered.append(key)
+                remaining.discard(key)
+    for key in args:
+        if key in remaining:
+            ordered.append(key)
+            remaining.discard(key)
+
+    parts = []
+    for key in ordered:
+        value = args[key]
+        if key in target_keys:
+            parts.append(f"to {key} {value!r}")
+        elif key in recipient_keys:
+            parts.append(f"to {value!r}")
+        elif key in subject_keys:
+            parts.append(f"with {key} {value!r}")
+        elif key in body_keys:
+            parts.append(f"with {key} {value!r}")
+        else:
+            parts.append(f"{key}={value!r}")
+
+    return f"About to call {tool_name} ({'; '.join(parts)})."
+
+
 _APPROVE_RESPONSES = frozenset({
     "y", "yes", "yeah", "yep", "yup", "ya",
     "ok", "okay", "k",
@@ -60,124 +102,43 @@ assert parse_confirmation('N') == 'deny'
 assert parse_confirmation('maybe') == 'unknown'
 
 
-# --- Risk tier classification for write actions ---
+def gate_write_action(tool_name: str, args: dict, input_fn=None) -> bool:
+    """Top-level entry point that gates a write action behind user approval.
 
-# Paths that are considered sensitive. Writing to (or under) any of these
-# is treated as high-risk regardless of the tool name.
-_SENSITIVE_PATH_TOKENS = (
-    "/etc/", "/etc/passwd", "/etc/shadow", "/etc/sudoers", "/etc/hosts",
-    "/boot/", "/sys/", "/proc/", "/dev/",
-    "/usr/", "/sbin/", "/bin/", "/lib/", "/lib64/",
-    "/var/log/", "/var/lib/", "/var/run/",
-    "/root/", "/.ssh/", "/.aws/", "/.gnupg/", "/.config/",
-    "c:\\windows", "c:\\program files", "c:\\programdata",
-)
-
-# Tools whose default behavior is to talk to the outside world. Even
-# when the call looks innocent (e.g. a short email body) we want a
-# human to confirm before we fire it off.
-_EXTERNAL_SEND_TOOLS = frozenset({
-    "send_email", "send_mail", "smtp_send",
-    "send_sms", "send_message", "send_notification",
-    "http_post", "http_put", "http_request", "api_call", "fetch",
-    "webhook", "publish", "upload", "ftp_upload", "scp",
-    "post_to_slack", "slack_post", "discord_post",
-    "tweet", "post_tweet", "mastodon_post",
-})
-
-# Tools that are inherently destructive. They bypass path checks because
-# the harm comes from the verb, not the destination.
-_DESTRUCTIVE_TOOLS = frozenset({
-    "rm", "rm_rf", "delete", "delete_file", "delete_record",
-    "drop_table", "drop_database", "truncate", "purge",
-    "format", "mkfs", "dd", "wipe", "shred",
-    "exec", "execute", "run_command", "shell", "bash", "cmd",
-})
-
-# Verbs inside an args blob (e.g. a shell command string) that signal
-# destruction even when the tool name itself is neutral.
-_DESTRUCTIVE_VERB_PATTERNS = (
-    "rm -rf", "rm -fr", "rm -r ", "rmdir", "del /", "del /f",
-    "drop table", "drop database", "truncate table",
-    ":(){:|:&};:", "mkfs", "wipefs", "shred ",
-    "format c:", "format d:",
-    "git push --force", "git push -f", "git reset --hard",
-    "dd if=", ":>|", "chmod 777", "chown -r",
-)
-
-# Locations that are clearly scratch / throwaway space. Writing here is
-# almost always safe and gets the lowest tier.
-_TEMP_PATH_PREFIXES = ("/tmp/", "/var/tmp/", "/dev/shm/", "\\temp\\", "\\tmp\\")
-
-
-def _normalize_path(args: dict) -> str:
-    """Pull a filesystem path out of common arg names, lowercased."""
-    for key in ("path", "file", "filename", "filepath", "target", "destination", "dest", "url"):
-        if key in args and args[key] is not None:
-            return str(args[key]).lower()
-    return ""
-
-
-def _normalize_command(args: dict) -> str:
-    """Pull a shell command out of common arg names, lowercased."""
-    for key in ("command", "cmd", "shell_command", "script", "code"):
-        if key in args and args[key] is not None:
-            return str(args[key]).lower()
-    return ""
-
-
-def classify_write_action(tool_name: str, args: dict) -> str:
-    """Classify a harness write tool call as 'high', 'medium', or 'low' risk.
-
-    The tier is bumped up by:
-      * sensitive filesystem paths (system dirs, credential stores, ...),
-      * destructive verbs (rm -rf, drop table, format, force-push, ...),
-      * external sends (email, HTTP POST, webhook, upload, ...).
+    Classifies the action (read-only tools pass through without prompting),
+    summarizes the intent, prompts the user, and returns True only when the
+    user issues an 'approve' decision. 'deny', 'edit', and any non-approving
+    or unrecognized input all return False.
     """
-    args = args or {}
-    tool = (tool_name or "").lower().strip()
-    path = _normalize_path(args)
-    command = _normalize_command(args)
+    if input_fn is None:
+        input_fn = input
 
-    # 1. Destructive tools are always high risk.
-    if tool in _DESTRUCTIVE_TOOLS:
-        return "high"
+    # --- Classify: read-only tools are safe and require no confirmation ---
+    read_only_tools = frozenset({
+        "read_file", "read", "get", "list", "list_dir", "ls",
+        "search", "find", "query", "fetch", "view", "show",
+        "info", "status", "check", "exists", "stat",
+        "cat", "head", "tail", "grep", "wc", "diff",
+    })
+    normalized_name = (tool_name or "").lower()
+    is_read_only = (
+        normalized_name in read_only_tools
+        or normalized_name.startswith("read_")
+        or normalized_name.startswith("get_")
+        or normalized_name.startswith("list_")
+        or normalized_name.startswith("search_")
+        or normalized_name.startswith("fetch_")
+    )
+    if is_read_only:
+        return True
 
-    # 2. Destructive verbs hidden in a command string.
-    if command:
-        for pat in _DESTRUCTIVE_VERB_PATTERNS:
-            if pat in command:
-                return "high"
+    # --- Summarize ---
+    summary = summarize_write_intent(tool_name, args)
 
-    # 3. Sensitive path targets.
-    if path:
-        # Exact sensitive file matches
-        if path in _SENSITIVE_PATH_TOKENS:
-            return "high"
-        # Prefix / substring matches against directory tokens
-        for token in _SENSITIVE_PATH_TOKENS:
-            if token.endswith("/") and path.startswith(token):
-                return "high"
-            if token in path and token != path:
-                return "high"
+    # --- Prompt the user ---
+    prompt = f"{summary}\nApprove this action? [y/n/edit] "
+    response = input_fn(prompt)
 
-    # 4. External send tools default to medium risk.
-    if tool in _EXTERNAL_SEND_TOOLS:
-        return "medium"
-
-    # 5. Writing to a known scratch/temp directory is low risk.
-    if tool.startswith("write") or tool in {"create_file", "save_file", "edit_file", "append_file"}:
-        if path and any(path.startswith(p) for p in _TEMP_PATH_PREFIXES):
-            return "low"
-        # Writing to a persistent (non-temp) location needs a glance.
-        if path:
-            return "medium"
-        return "low"
-
-    # 6. Unknown tools with a sensitive path caught above; otherwise low.
-    return "low"
-
-
-assert classify_write_action('write_file', {'path': '/etc/passwd'}) == 'high'
-assert classify_write_action('write_file', {'path': '/tmp/notes.md'}) == 'low'
-assert classify_write_action('send_email', {'to': 'a@b.com'}) == 'medium'
+    # --- Decide ---
+    decision = parse_confirmation(response)
+    return decision == "approve"
