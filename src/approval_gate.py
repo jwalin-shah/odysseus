@@ -1,53 +1,65 @@
-def classify_action_risk(action: str) -> str:
+"""Approval gate module: parses free-form CLI responses into normalized actions."""
+
+
+def parse_confirmation_response(raw: str) -> str:
+    """Normalize a free-form CLI reply into one of the canonical action tokens.
+
+    Returns:
+        'approve' - the user wants to proceed this time.
+        'deny'    - the user wants to cancel/abort this time.
+        'always'  - the user wants to proceed and remember for the future.
+        'never'   - the user wants to never be asked again (or always cancel).
+        'invalid' - the response did not match any known affirmative/negative pattern.
     """
-    Classify a named harness action as 'read' or 'write'.
+    if not isinstance(raw, str):
+        return 'invalid'
+    text = raw.strip().lower()
+    if not text:
+        return 'invalid'
 
-    Read actions only observe state without mutating external systems.
-    Write actions mutate external state and therefore require approval.
+    approve_set = {
+        'y', 'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'k',
+        'approve', 'approved', 'confirm', 'confirmed', 'affirm',
+        'agreed', 'agree', 'accept', 'accepted', 'go', 'proceed',
+        'go ahead', 'do it', 'do', 'true', 'correct', 'right',
+        'positive', 'aye', 'yea', 'definitely', 'certainly',
+        'absolutely', 'indeed', 'of course', 'fine', 'alright',
+        'aight', 'ye', 'ya', 'yah', 'yeh', 'yessir', 'roger',
+        '10-4', 'affirmative', 'sounds good', 'perfect', 'great',
+        'good', 'yas', 'righto', 'okey', 'okey-dokey', 'okey dokey',
+    }
 
-    Unknown actions default to 'write' (fail-secure) so that any unrecognized
-    action is treated as potentially mutating and routed through the gate.
+    deny_set = {
+        'n', 'no', 'nope', 'nah', 'na', 'naw', 'nay', 'no way',
+        'deny', 'denied', 'reject', 'rejected', 'refuse', 'refused',
+        'negative', 'disagree', 'decline', 'declined', 'no thanks',
+        'no thank you', 'wrong', 'incorrect', 'false', 'negatory',
+        'absolutely not', 'definitely not', 'certainly not',
+        "i can't", "i won't", 'i refuse', 'no can do', 'sorry no',
+        'nein', 'non', 'niet', 'no sir',
+    }
 
-    Examples:
-        classify_action_risk('read') == 'read'
-        classify_action_risk('send') == 'write'
-        classify_action_risk('calendar_create') == 'write'
-    """
-    if not isinstance(action, str):
-        return 'write'
+    always_set = {
+        'always', 'all', 'every time', 'everytime', 'every',
+        'forever', 'evermore', 'ever', 'eternally', 'permanently',
+        'all the time', 'for good', 'for keeps', 'for life',
+        'for ever', 'each time', 'each', 'at all times',
+    }
 
-    normalized = action.strip().lower()
-    if not normalized:
-        return 'write'
+    never_set = {
+        'never', 'none', 'not at all', 'not ever', 'not once',
+        'no way ever', 'no chance', 'fat chance', 'when pigs fly',
+        'when hell freezes over', 'no siree', 'no sirree',
+        'over my dead body', 'not on your life',
+        'not in a million years', 'never ever',
+    }
 
-    # Verbs that indicate mutation of external state.
-    # Checked first so that, e.g., 'send_email' is not misread as a read.
-    write_verbs = (
-        'send', 'create', 'update', 'delete', 'write', 'post',
-        'put', 'patch', 'remove', 'destroy', 'add', 'modify',
-        'change', 'set', 'drop', 'truncate', 'insert', 'upsert',
-        'approve', 'reject', 'cancel', 'submit', 'publish',
-        'forward', 'reply', 'transfer', 'pay', 'charge',
-    )
-
-    # Verbs that indicate read-only observation.
-    read_verbs = (
-        'read', 'get', 'list', 'view', 'fetch', 'query', 'search',
-        'check', 'inspect', 'observe', 'monitor', 'retrieve',
-        'describe', 'show', 'count', 'find', 'lookup', 'select',
-    )
-
-    for verb in write_verbs:
-        # Match either as a whole token (separated by non-alphanumeric)
-        # or as a suffix/prefix that clearly indicates the action kind.
-        # Using substring keeps the heuristic simple and matches
-        # conventions like 'calendar_create', 'send_email', 'post_message'.
-        if verb in normalized:
-            return 'write'
-
-    for verb in read_verbs:
-        if verb in normalized:
-            return 'read'
-
-    # Fail-secure: unknown actions require approval.
-    return 'write'
+    if text in approve_set:
+        return 'approve'
+    if text in deny_set:
+        return 'deny'
+    if text in always_set:
+        return 'always'
+    if text in never_set:
+        return 'never'
+    return 'invalid'
