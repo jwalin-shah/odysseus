@@ -22,14 +22,19 @@ def compute_message_hash(msg: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def filter_new_messages(messages: list, known_hashes: set) -> list:
-    """Return the subset of messages whose computed hash is not in known_hashes.
+def load_hash_store(path: str) -> set:
+    """Load a set of message hashes from a JSON file at path.
 
-    Preserves the order of ``messages`` as given in the input. A message is
-    considered "known" when ``compute_message_hash(msg)`` is present in
-    ``known_hashes``.
+    Returns an empty set if the file is missing or contains invalid JSON.
     """
-    return [msg for msg in messages if compute_message_hash(msg) not in known_hashes]
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+    if isinstance(data, list):
+        return set(data)
+    return set()
 
 
 assert len(compute_message_hash({"id": "1", "subject": "s", "body": "b", "sender": "a", "timestamp": 1})) == 64
