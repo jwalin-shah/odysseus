@@ -47,7 +47,7 @@ class Queue:
         return self._out_stack.peek()
 
     def is_empty(self):
-        return self._in_stack.is_empty() and self._out_stack.is_empty()
+        return self._in_stack.is_empty()
 
     def size(self):
         return self._in_stack.size() + self._out_stack.size()
