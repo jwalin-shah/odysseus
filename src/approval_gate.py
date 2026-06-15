@@ -1,18 +1,3 @@
-_WRITE_ACTIONS = frozenset({
-    "write_file",
-    "edit_file",
-    "create_document",
-    "update_document",
-    "edit_document",
-})
-
-
-def is_write_action(action_name: str) -> bool:
-    """Return True when the given harness action is a write action that
-    must pass through the approval gate."""
-    return action_name in _WRITE_ACTIONS
-
-
 def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
     lines = [f"Approve {action_name}?"]
     for key, value in action_args.items():
@@ -21,6 +6,15 @@ def format_confirmation_prompt(action_name: str, action_args: dict) -> str:
     return "\n".join(lines)
 
 
-assert is_write_action('write_file') is True
-assert is_write_action('edit_file') is True
-assert is_write_action('read_file') is False
+def format_write_prompt(action: str, target: str, preview: str) -> str:
+    lines = [f"About to {action} {target}:"]
+    lines.append("  Preview:")
+    for preview_line in preview.split("\n"):
+        lines.append(f"    {preview_line}")
+    lines.append("[y/N]")
+    return "\n".join(lines)
+
+
+assert 'write_file' in format_write_prompt('write_file', '/tmp/a.txt', 'hello')
+assert '/tmp/a.txt' in format_write_prompt('write_file', '/tmp/a.txt', 'hello')
+assert format_write_prompt('edit_file', 'p.py', 'x=1').endswith('[y/N]')
