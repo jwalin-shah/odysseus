@@ -7,27 +7,21 @@ def merge_new_hashes(cache: set, new_hashes: set) -> set:
     return cache | new_hashes
 
 
-def compute_message_hash(message) -> str:
-    """Return a stable hex digest for a single message."""
-    payload = json.dumps(message, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+def compute_message_hash(msg: dict) -> str:
+    """Compute a stable SHA256 hex digest over a message's identifying fields.
+
+    Hashes only (id, sender, subject, body, timestamp) in a fixed, sorted
+    order so that identical messages produce the same digest regardless of
+    where those fields sit in the input dict or what other metadata is
+    attached. Missing fields are treated as ``None`` and ignored-field
+    metadata is dropped entirely.
+    """
+    fields = ("id", "sender", "subject", "body", "timestamp")
+    canonical = {field: msg.get(field) for field in fields}
+    serialized = json.dumps(canonical, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def compute_message_hashes(messages: list) -> list:
-    """Hash a batch of messages and return a list of hex digests in the same order as the input."""
-    return [compute_message_hash(m) for m in messages]
-
-
-def filter_new_messages(messages: list, seen: set) -> list:
-    """Return the subset of messages whose computed hash is not in the seen set, preserving the input order."""
-    return [m for m in messages if compute_message_hash(m) not in seen]
-
-
-assert compute_message_hashes([]) == []
-assert len(compute_message_hashes([{"id": str(i)} for i in range(5)])) == 5
-assert compute_message_hashes([{"id": "42"}])[0] == compute_message_hash({"id": "42"})
-
-
-assert filter_new_messages([], set()) == []
-assert filter_new_messages([{"id": "1"}], set()) == [{"id": "1"}]
-assert filter_new_messages([{"id": "1"}, {"id": "2"}], {compute_message_hash({"id": "1"})}) == [{"id": "2"}]
+assert len(compute_message_hash({"id": "1", "subject": "s", "body": "b", "sender": "a", "timestamp": 1})) == 64
+assert compute_message_hash({"id": "1", "subject": "s"}) == compute_message_hash({"subject": "s", "id": "1", "noise": "x"})
+assert compute_message_hash({"id": "1"}) != compute_message_hash({"id": "2"})
