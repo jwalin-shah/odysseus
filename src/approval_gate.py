@@ -1,64 +1,45 @@
-"""Parse CLI approval gate responses into structured decisions."""
+import uuid
 
-from __future__ import annotations
-
-# Tokens that signal approval (single-shot).
-_POSITIVE_TOKENS = frozenset({"y", "yes"})
-
-# Tokens that signal explicit denial.
-_NEGATIVE_TOKENS = frozenset({"n", "no"})
-
-# Tokens that signal "approve and remember this decision".
-_REMEMBER_TOKENS = frozenset({"always"})
+DESTRUCTIVE_TOOLS = {'rm', 'delete', 'destroy', 'remove', 'unlink', 'truncate'}
+WRITE_TOOLS = {'write_file', 'write', 'create', 'modify', 'edit', 'append', 'update'}
 
 
-def parse_confirmation_response(text: str) -> dict:
-    """Parse raw CLI input into a structured approval decision.
+def _classify_kind(tool: str) -> str:
+    """Map a tool name to an approval kind category."""
+    if tool in DESTRUCTIVE_TOOLS or any(tool.startswith(p) for p in DESTRUCTIVE_TOOLS):
+        return 'destructive'
+    if tool in WRITE_TOOLS or any(p in tool for p in ('write', 'create', 'append', 'modify')):
+        return 'write'
+    return 'read'
 
-    Returns a dict with three fields:
-        - allow (bool): whether the action is approved.
-        - remember (str): empty for one-shot, otherwise a persistence key
-          such as ``"always"``.
-        - reason (str): free-form justification supplied by the user.
 
-    Empty input and any unrecognized token default to denial.
+def _build_summary(action: dict) -> str:
+    """Build a human-readable summary line for the approval request."""
+    tool = action.get('tool', 'unknown')
+    path = action.get('path')
+    parts = [f"Execute {tool}"]
+    if path:
+        parts.append(f"on {path}")
+    if 'bytes' in action:
+        parts.append(f"({action['bytes']} bytes)")
+    if 'command' in action:
+        parts.append(f"cmd={action['command']}")
+    return ' '.join(parts)
+
+
+def build_approval_request(action: dict, owner: str) -> dict:
+    """Package a harness action into an approval request dict.
+
+    The returned dict contains:
+      - request_id: unique identifier (uuid4 string)
+      - summary:    human-readable description of the action
+      - kind:       category used for policy lookup ('read' | 'write' | 'destructive')
+      - owner:      the requesting principal
     """
-    result = {"allow": False, "remember": "", "reason": ""}
-
-    if not isinstance(text, str):
-        return result
-
-    cleaned = text.strip()
-    if not cleaned:
-        return result
-
-    lowered = cleaned.lower()
-    tokens = lowered.split(maxsplit=1)
-    head = tokens[0]
-    tail = tokens[1] if len(tokens) > 1 else ""
-
-    # Standalone "always" -> approve and remember, optional trailing reason.
-    if head in _REMEMBER_TOKENS:
-        return {
-            "allow": True,
-            "remember": "always",
-            "reason": tail.strip(),
-        }
-
-    # Positive responses may carry a remember modifier or a reason.
-    if head in _POSITIVE_TOKENS:
-        remember = ""
-        reason = tail.strip()
-        if reason:
-            reason_tokens = reason.split()
-            if reason_tokens[0] in _REMEMBER_TOKENS:
-                remember = "always"
-                reason = " ".join(reason_tokens[1:]).strip()
-        return {"allow": True, "remember": remember, "reason": reason}
-
-    # Explicit negative responses capture the reason but never remember.
-    if head in _NEGATIVE_TOKENS:
-        return {"allow": False, "remember": "", "reason": tail.strip()}
-
-    # Unknown input falls through to the safe default: deny.
-    return result
+    tool = action.get('tool', '')
+    return {
+        'request_id': str(uuid.uuid4()),
+        'summary': _build_summary(action),
+        'kind': _classify_kind(tool),
+        'owner': owner,
+    }
