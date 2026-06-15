@@ -8,5 +8,13 @@ def backoff_sequence(retries: int, base: float, max_delay: float | None = None) 
     return result
 
 
-def _best_by_score(attempts: list) -> dict:
-    return max(attempts, key=lambda a: a['score'])
+def _first_passing(attempts: list) -> dict:
+    for attempt in attempts:
+        if attempt.get('passed') is True:
+            return attempt
+    return None
+
+
+assert _first_passing([{'passed': False}, {'passed': True}, {'passed': True}])['passed'] is True
+assert _first_passing([{'passed': False}, {'passed': False}]) is None
+assert _first_passing([]) is None
