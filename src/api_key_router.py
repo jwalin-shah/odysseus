@@ -1,9 +1,11 @@
-def is_quota_error(exc: BaseException) -> bool:
-    """
-    Classify whether an exception represents a quota / rate-limit failure
-    from an LLM provider by inspecting message text for tokens like '429',
-    'quota', 'rate limit', or 'too many requests'.
-    """
-    message = str(exc).lower()
-    quota_tokens = ('429', 'quota', 'rate limit', 'too many requests')
-    return any(token in message for token in quota_tokens)
+class ApiKeyRouter:
+    def __init__(self, keys: list[str]):
+        self._keys = list(keys)
+        self._quota_exceeded: set[str] = set()
+
+    def mark_quota_exceeded(self, key: str) -> None:
+        if key in self._keys:
+            self._quota_exceeded.add(key)
+
+    def available_keys(self) -> list[str]:
+        return [key for key in self._keys if key not in self._quota_exceeded]
