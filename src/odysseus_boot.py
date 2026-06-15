@@ -1,230 +1,251 @@
-#!/usr/bin/env python3
 """
-odysseus_boot.py — pre-flight reachability check for Odysseus.
+odysseus_boot.py — startup checker for the Odysseus runtime.
 
-Runs five short checks in parallel (each capped at 3s) and prints a
-colour-coded status table.  The returned dict is the machine-readable
-contract:
+Runs a small set of fast, parallel health checks (3s timeout each) against
+every external dependency the agent needs:
 
-    {
-        "inbox":       True,    # /health on the local inbox server
-        "tokenrouter": True,    # one tiny MiniMax-M3 completion
-        "pi":          True,    # `pi --version` succeeds
-        "imessage":    True,    # ~/Library/Messages/chat.db is readable
-        "whatsapp":    "skip",  # Accessibility probe (OK or "skip")
-    }
+    1. inbox HTTP server      (http://localhost:9849/health)
+    2. TokenRouter API        (one tiny M3 call)
+    3. pi CLI on PATH         (`pi --version`)
+    4. iMessage DB readable   (~/Library/Messages/chat.db)
+    5. WhatsApp accessibility (macOS AX API, OK/SKIP — never fatal)
 
-A `True` value means reachable/usable, `False` means unreachable, and the
-string `"skip"` is reserved for the WhatsApp probe on systems where the
-check cannot be performed (non-macOS, no permission, etc.).
+Usage:
+    python -m odysseus_boot        # prints a colored table, returns a dict
+    python -c "from odysseus_boot import run_checks; print(run_checks())"
 """
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import os
+import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Tuple
 
-# ─── presentation ────────────────────────────────────────────────────────
-GREEN, RED, YELLOW = "\033[92m", "\033[91m", "\033[93m"
-CYAN, BOLD, DIM, RESET = "\033[96m", "\033[1m", "\033[2m", "\033[0m"
+# `requests` is the only hard third-party dep; degrade gracefully if missing.
+try:
+    import requests  # type: ignore
+except ImportError:  # pragma: no cover
+    requests = None  # type: ignore
 
-TIMEOUT_S = 3.0
-NAME_WIDTH = 14
-DETAIL_WIDTH = 48
 
-# ─── individual checks ───────────────────────────────────────────────────
-# Each check returns (status, detail).
-#   status  is True / False  for hard pass/fail
-#   status  is "skip"        for the WhatsApp probe only
-#   detail  is a short human-readable string for the table
+# ---------------------------------------------------------------------------
+# Colored output helpers
+# ---------------------------------------------------------------------------
 
-def _check_inbox() -> tuple[bool, str]:
-    url = os.environ.get("ODYSSEUS_INBOX_URL", "http://localhost:9849/health")
+_NO_COLOR = os.environ.get("NO_COLOR") is not None
+_USE_COLOR = sys.stdout.isatty() and not _NO_COLOR
+
+
+def _c(code: str, text: str) -> str:
+    """Wrap `text` in ANSI color codes (no-op if not a TTY)."""
+    if not _USE_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _ok() -> str:    return _c("32", "  ✓ OK   ")
+def _fail() -> str:  return _c("31", "  ✗ FAIL ")
+def _skip() -> str:  return _c("33", "  ~ SKIP ")
+
+
+# ---------------------------------------------------------------------------
+# Individual checks — each must accept a timeout and return bool | str.
+# ---------------------------------------------------------------------------
+
+def check_inbox(timeout: float) -> bool:
+    """GET http://localhost:9849/health — 2xx is OK."""
+    if requests is None:
+        return False
     try:
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-            ok = 200 <= resp.status < 300
-            return ok, f"GET {url} → {resp.status}"
-    except urllib.error.HTTPError as e:
-        return False, f"GET {url} → HTTP {e.code}"
-    except Exception as e:
-        return False, f"GET {url} → {type(e).__name__}"
+        r = requests.get("http://localhost:9849/health", timeout=timeout)
+        return 200 <= r.status_code < 300
+    except Exception:
+        return False
 
 
-def _check_tokenrouter() -> tuple[bool, str]:
-    """Fire one minimal completion — the cheapest possible M3 round-trip."""
-    url = os.environ.get(
-        "ODYSSEUS_TOKENROUTER_URL",
-        "http://localhost:9848/v1/chat/completions",
+def check_tokenrouter(timeout: float) -> bool:
+    """One tiny M3 call (max_tokens=1) through the TokenRouter proxy."""
+    if requests is None:
+        return False
+    endpoint = os.environ.get(
+        "TOKENROUTER_URL", "http://localhost:9848/v1/messages"
     )
-    api_key = os.environ.get("ODYSSEUS_TOKENROUTER_KEY", "")
-    model = os.environ.get("ODYSSEUS_TOKENROUTER_MODEL", "MiniMax-M3")
-
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json"},
+    api_key = (
+        os.environ.get("TOKENROUTER_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
     )
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
-
+    if not api_key:
+        return False
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-            body = json.loads(resp.read() or b"{}")
-            used = body.get("usage", {}).get("total_tokens", "?")
-            ok = 200 <= resp.status < 300
-            return ok, f"POST {url} → {resp.status} · {used} tok"
-    except urllib.error.HTTPError as e:
-        return False, f"POST {url} → HTTP {e.code}"
-    except Exception as e:
-        return False, f"POST {url} → {type(e).__name__}"
-
-
-def _check_pi() -> tuple[bool, str]:
-    try:
-        r = subprocess.run(
-            ["pi", "--version"],
-            capture_output=True, text=True, timeout=TIMEOUT_S,
+        r = requests.post(
+            endpoint,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": os.environ.get("TOKENROUTER_MODEL", "MiniMax-M3"),
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "."}],
+            },
+            timeout=timeout,
         )
-    except FileNotFoundError:
-        return False, "`pi` not on PATH"
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-
-    if r.returncode == 0:
-        first_line = (r.stdout or r.stderr).strip().splitlines()
-        return True, first_line[0] if first_line else "ok"
-    return False, f"exit {r.returncode}"
+        return r.ok
+    except Exception:
+        return False
 
 
-def _check_imessage() -> tuple[bool, str]:
+def check_pi(timeout: float) -> bool:
+    """`pi --version` exits 0."""
+    pi_path = shutil.which("pi")
+    if not pi_path:
+        return False
+    try:
+        result = subprocess.run(
+            [pi_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def check_imessage(timeout: float) -> bool:
+    """~/Library/Messages/chat.db exists and is openable."""
     db = Path.home() / "Library" / "Messages" / "chat.db"
     if not db.exists():
-        return False, f"missing: {db}"
-    if not os.access(db, os.R_OK):
-        return False, f"unreadable: {db}"
-    size_mb = db.stat().st_size / (1024 * 1024)
-    return True, f"{size_mb:.1f} MB"
-
-
-def _check_whatsapp() -> tuple[Any, str]:
-    """
-    OK if Accessibility permission is granted AND we can enumerate
-    processes via System Events.  SKIP for every other condition:
-    non-macOS, osascript missing, permission not yet granted, or
-    any other error — the daemon can still run, the user just has
-    to grant access in System Settings.
-    """
-    if sys.platform != "darwin":
-        return "skip", "non-darwin"
-
-    script = 'tell application "System Events" to count processes'
+        return False
     try:
-        r = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=TIMEOUT_S,
+        # Opening in binary mode is enough to confirm readability on macOS;
+        # the SIP-protected full-disk-access case is a separate concern.
+        with open(db, "rb"):
+            return True
+    except OSError:
+        return False
+
+
+def check_whatsapp(timeout: float) -> str:
+    """macOS Accessibility API — return 'ok' / 'skip'. Never 'fail'."""
+    if sys.platform != "darwin":
+        return "skip"
+    try:
+        # PyObjC path — the canonical macOS way.
+        from ApplicationServices import (  # type: ignore
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
         )
-    except FileNotFoundError:
-        return "skip", "no osascript"
-    except subprocess.TimeoutExpired:
-        return "skip", "timeout"
-
-    if r.returncode == 0 and r.stdout.strip().isdigit():
-        return True, f"{r.stdout.strip()} processes visible"
-
-    err = (r.stderr or "").lower()
-    if any(token in err for token in ("not authorized", "assistive", "accessibility")):
-        return "skip", "grant Accessibility in System Settings"
-    return "skip", (err.strip() or "unknown")[:40]
+        # Pass False so we *probe* without spawning a system prompt.
+        trusted = bool(
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False})
+        )
+        return "ok" if trusted else "skip"
+    except Exception:
+        # No PyObjC, or AX API not reachable from this process — treat as skip.
+        return "skip"
 
 
-# (name, fn) — order here drives the printed table and the returned dict
-CHECKS: tuple[tuple[str, Callable[[], tuple[Any, str]]], ...] = (
-    ("inbox",       _check_inbox),
-    ("tokenrouter", _check_tokenrouter),
-    ("pi",          _check_pi),
-    ("imessage",    _check_imessage),
-    ("whatsapp",    _check_whatsapp),
-)
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+# Order is also the display order in the table.
+CHECKS: List[Tuple[str, Callable[[float], Any]]] = [
+    ("inbox",       check_inbox),
+    ("tokenrouter", check_tokenrouter),
+    ("pi",          check_pi),
+    ("imessage",    check_imessage),
+    ("whatsapp",    check_whatsapp),
+]
+
+CHECK_TIMEOUT = 3.0
 
 
-# ─── presentation ────────────────────────────────────────────────────────
-def _marker(status: Any) -> str:
-    if status == "skip":
-        return f"{YELLOW}○ SKIP{RESET}"
-    if status is True:
-        return f"{GREEN}● OK  {RESET}"
-    return f"{RED}✗ FAIL{RESET}"
-
-
-def _print_table(results: dict[str, Any], details: dict[str, str]) -> None:
-    print()
-    print(f"  {BOLD}{CYAN}⚓ Odysseus boot check{RESET} "
-          f"{DIM}(parallel, {TIMEOUT_S:g}s timeout each){RESET}")
-    print(f"  {DIM}{'─' * 64}{RESET}")
-
-    ok = fail = skip = 0
-    for name, _ in CHECKS:
-        status = results[name]
-        detail = details[name]
-        if len(detail) > DETAIL_WIDTH:
-            detail = detail[: DETAIL_WIDTH - 1] + "…"
-        print(f"  {_marker(status)}  {BOLD}{name:<{NAME_WIDTH}}{RESET} "
-              f"{DIM}{detail}{RESET}")
-        if status is True:    ok += 1
-        elif status == "skip": skip += 1
-        else:                  fail += 1
-
-    summary = f"{ok} ok"
-    if skip:  summary += f", {skip} skip"
-    if fail:  summary += f", {RED}{fail} fail{RESET}"
-    print(f"  {DIM}{'─' * 64}{RESET}")
-    print(f"  {summary}\n")
-
-
-# ─── public entry point ──────────────────────────────────────────────────
-def boot_check() -> dict[str, Any]:
-    """
-    Run every check in parallel and return the status dict.
-
-    The dict preserves the declared check order, with boolean values
-    for the four hard checks and either True or the string "skip"
-    for the WhatsApp accessibility probe.
-    """
-    results: dict[str, Any] = {}
-    details: dict[str, str] = {}
+def run_checks(timeout: float = CHECK_TIMEOUT) -> Dict[str, Any]:
+    """Run all checks in parallel; return a {name: status} dict."""
+    results: Dict[str, Any] = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(CHECKS)) as ex:
-        futures = {ex.submit(fn): name for name, fn in CHECKS}
-        for fut in concurrent.futures.as_completed(futures):
-            name = futures[fut]
-            try:
-                status, detail = fut.result()
-            except Exception as e:                       # pragma: no cover
-                status, detail = False, f"{type(e).__name__}: {e}"
-            results[name] = status
-            details[name]  = detail
+        future_to_name = {
+            ex.submit(fn, timeout): name for name, fn in CHECKS
+        }
+        # Outer ceiling: even if a check somehow ignores its timeout, the
+        # whole boot probe still completes within ~timeout+slack seconds.
+        try:
+            done, _ = concurrent.futures.wait(
+                future_to_name.values(),
+                timeout=timeout + 1.0,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+        except Exception:
+            done = set()
 
-    # stable, declared order in the returned dict
-    ordered: dict[str, Any] = {name: results[name] for name, _ in CHECKS}
-    _print_table(ordered, details)
-    return ordered
+        for fut, name in future_to_name.items():
+            if fut not in done or not fut.done():
+                # Timed out — whatsapp is the only one allowed to be 'skip'.
+                results[name] = "skip" if name == "whatsapp" else False
+                continue
+            try:
+                results[name] = fut.result()
+            except Exception:
+                results[name] = "skip" if name == "whatsapp" else False
+
+    # Defensive: ensure every declared check is present in the result dict.
+    for name, _ in CHECKS:
+        results.setdefault(name, "skip" if name == "whatsapp" else False)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Pretty printing
+# ---------------------------------------------------------------------------
+
+def _format_status(value: Any) -> str:
+    if value is True:
+        return _ok()
+    if value is False:
+        return _fail()
+    if isinstance(value, str):
+        v = value.lower()
+        if v == "ok":   return _ok()
+        if v == "skip": return _skip()
+    return _c("90", f"  ? {value} ")
+
+
+def print_table(results: Dict[str, Any]) -> None:
+    name_w = max(len(n) for n, _ in CHECKS) + 2
+    bar = _c("90", "─" * (name_w + 14))
+
+    print(_c("1;97", "Odysseus boot check"))
+    print(bar)
+    for name, _ in CHECKS:
+        status = _format_status(results.get(name))
+        print(f"  {_c('97', name.ljust(name_w))}{status}")
+    print(bar)
+
+    # One-line summary — handy for logs / CI.
+    summary = "  ".join(
+        f"{name}={results.get(name)!r}" for name, _ in CHECKS
+    )
+    print(_c("90", summary))
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def main() -> Dict[str, Any]:
+    results = run_checks()
+    print_table(results)
+    return results
 
 
 if __name__ == "__main__":
-    out = boot_check()
-    # exit non-zero if any hard check failed (skip never counts as failure)
-    sys.exit(1 if any(v is False for v in out.values()) else 0)
+    main()
