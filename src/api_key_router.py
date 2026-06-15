@@ -1,6 +1,26 @@
-def mark_key_exhausted(state: dict, key_id: str, cooldown_seconds: float, now: float) -> None:
-    """Record that a key is exhausted until now+cooldown_seconds so the router skips it."""
-    if key_id not in state:
-        state[key_id] = {}
-    state[key_id]["exhausted_until"] = now + cooldown_seconds
-    state[key_id]["failures"] = state[key_id].get("failures", 0) + 1
+def parse_api_keys_config(raw: dict) -> list[dict]:
+    """
+    Parses a config dict into a normalized list of API key records.
+
+    Each record contains: id, key, provider, and weight.
+    Missing optional fields are filled with sensible defaults.
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    keys = raw.get("keys", [])
+    if not isinstance(keys, list):
+        return []
+
+    result = []
+    for entry in keys:
+        if not isinstance(entry, dict):
+            continue
+        record = {
+            "id": entry.get("id"),
+            "key": entry.get("key"),
+            "provider": entry.get("provider", ""),
+            "weight": entry.get("weight", 1),
+        }
+        result.append(record)
+    return result
