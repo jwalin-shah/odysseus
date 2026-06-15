@@ -19,12 +19,12 @@ class CircuitBreaker:
         return self._failures
 
     @property
-    def failures(self):
-        return self._failures
-
-    @property
     def opened_at(self):
         return self._opened_at
+
+    def allow(self) -> bool:
+        self._maybe_half_open()
+        return self._state != 'open'
 
     def record_failure(self) -> None:
         self._failures += 1
