@@ -1,77 +1,85 @@
 """Prompt templates for function implementation."""
 
+# Raw prompt templates indexed by name. Each template uses named format placeholders
+# (e.g. ``{spec}``, ``{scope}``) that the corresponding ``build_*`` helpers fill in.
+_PROMPT_TEMPLATES = {
+    "REVIEW": (
+        "You are a senior software engineer performing a thorough code review.\n\n"
+        "Please review the following code and provide detailed feedback on:\n"
+        "- Correctness: Does the code behave as intended for all valid inputs?\n"
+        "- Design: Is the code well-structured, modular, and maintainable?\n"
+        "- Performance: Are there any obvious performance issues or inefficiencies?\n"
+        "- Security: Are there any security vulnerabilities or unsafe practices?\n"
+        "- Style: Does the code follow language idioms and project conventions?\n"
+        "- Tests: Are there sufficient tests, and are edge cases covered?\n\n"
+        "Code to review:\n{code}\n\n"
+        "Provide your review as a clear, actionable list of findings with suggested improvements."
+    ),
+    "IMPLEMENT_FN": (
+        "You are a Python expert. Implement the following function based on the specification and signature.\n\n"
+        "Specification:\n{spec}\n\n"
+        "Signature:\n{signature}\n\n"
+        "Context:\n{context}\n\n"
+        "Please provide the complete function implementation, including any necessary imports and docstrings.\n"
+    ),
+    "SEARCH_REPLACE": (
+        "You are a code editing assistant. Perform a search-and-replace operation on the file at '{file_path}'.\n\n"
+        "Search text:\n{search_text}\n\n"
+        "Replace text:\n{replace_text}\n\n"
+        "Replace {scope} of the search text with the replace text.\n"
+    ),
+}
 
-_TEMPLATES: dict = {}
 
-
-def register_template(name: str):
-    """Decorator to register a prompt template builder function.
+def get_prompt_template(name: str) -> str:
+    """Return the raw template string for a named prompt template.
 
     Args:
-        name: The template name to register under.
+        name: The identifier of the template to retrieve (e.g. ``"REVIEW"``,
+            ``"IMPLEMENT_FN"``, ``"SEARCH_REPLACE"``).
 
     Returns:
-        A decorator that stores the function in the template registry.
+        The raw template string, containing named ``str.format`` placeholders
+        that callers can fill in themselves.
+
+    Raises:
+        KeyError: If ``name`` does not match any registered template.
     """
-    def decorator(func):
-        _TEMPLATES[name] = func
-        return func
-    return decorator
+    return _PROMPT_TEMPLATES[name]
 
 
-def list_template_names() -> list[str]:
-    """Return the names of all prompt templates registered in the library."""
-    return list(_TEMPLATES.keys())
-
-
-@register_template('IMPLEMENT_FN')
-def build_implement_fn_prompt(name: str, signature: str, docstring: str | None = None, language: str = 'python') -> str:
-    """Build a prompt instructing an LLM to implement a function.
+def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
+    """Build a prompt asking the model to implement a function.
 
     Args:
-        name: The name of the function to implement.
-        signature: The function signature line(s).
-        docstring: Optional docstring describing the function's behavior.
-        language: The programming language for the implementation (default 'python').
-
-    Returns:
-        The formatted prompt string.
-    """
-    parts = [
-        f"You are a {language} expert. Please implement the following function.",
-        f"Function name: {name}",
-        f"Signature:\n{signature}",
-    ]
-    if docstring:
-        parts.append(f"Docstring:\n{docstring}")
-    parts.append(
-        f"Please write the complete implementation of the `{name}` function in {language}, "
-        f"including any necessary imports and type hints."
-    )
-    return "\n\n".join(parts) + "\n"
-
-
-@register_template('REVIEW')
-def build_review_prompt(name: str, code: str, focus: str | None = None) -> str:
-    """Build a prompt instructing an LLM to review code.
-
-    Args:
-        name: The name of the function or component being reviewed.
-        code: The code to review.
-        focus: Optional aspect to focus the review on (e.g., 'security', 'performance').
+        spec: Specification of the function.
+        signature: Function signature.
+        context: Optional context information.
 
     Returns:
         The formatted prompt string.
     """
-    parts = [
-        f"You are a code review expert. Please review the following code.",
-        f"Target: {name}",
-        f"Code:\n{code}",
-    ]
-    if focus:
-        parts.append(f"Focus on: {focus}")
-    parts.append(
-        f"Please provide a detailed review of the `{name}` code, "
-        f"pointing out any issues, suggestions for improvement, and best practices."
+    template = get_prompt_template("IMPLEMENT_FN")
+    return template.format(spec=spec, signature=signature, context=context)
+
+
+def build_search_replace_prompt(file_path: str, search_text: str, replace_text: str, global_replace: bool = False) -> str:
+    """Build a prompt asking an LLM to perform a search-and-replace operation on a file.
+
+    Args:
+        file_path: Path to the file to be modified.
+        search_text: The text to search for in the file.
+        replace_text: The text to replace the search text with.
+        global_replace: If True, replace all occurrences; if False, replace only the first occurrence.
+
+    Returns:
+        The formatted prompt string.
+    """
+    scope = "all occurrences" if global_replace else "the first occurrence"
+    template = get_prompt_template("SEARCH_REPLACE")
+    return template.format(
+        file_path=file_path,
+        search_text=search_text,
+        replace_text=replace_text,
+        scope=scope,
     )
-    return "\n\n".join(parts) + "\n"
