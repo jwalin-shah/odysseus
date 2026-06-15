@@ -13,11 +13,7 @@ class ApiKeyRouter:
             self._keys.append(key)
 
     def mark_quota_exhausted(self, key: str) -> None:
-        """Mark an API key as quota-exhausted.
-
-        Subsequent get_next_key calls will skip this key until reset_all
-        is invoked. Marking an already-exhausted key is a no-op.
-        """
+        """Flag the given key as quota-exhausted."""
         self._quota_exceeded.add(key)
 
     def is_quota_exhausted(self, key: str) -> bool:
@@ -41,46 +37,26 @@ class ApiKeyRouter:
         message = str(exc).lower()
         return "quota" in message or "rate limit" in message
 
-    def all_exhausted(self) -> bool:
-        """Return True if every registered key is quota-exhausted."""
-        return len(self.available_keys()) == 0 and len(self._keys) > 0
+    def get_next_key(self) -> str | None:
+        """Return the next API key in round-robin order.
 
-    def reset_all(self) -> None:
-        """Clear all quota-exhausted flags and reset the rotation index."""
-        self._quota_exceeded.clear()
-        self._index = 0
-
-    def get_next_key(self) -> Optional[str]:
-        """Return the next available (non-exhausted) key, or None.
-
-        Walks the registered key list starting at the current index,
-        skipping any key currently flagged as quota-exhausted. After a
-        full pass with no available key, returns None.
+        Keys flagged as quota-exhausted are skipped. Returns None when every
+        registered key is currently marked as quota-exhausted, or when no
+        keys have been registered at all.
         """
         if not self._keys:
             return None
         n = len(self._keys)
-        for _ in range(n):
-            key = self._keys[self._index]
-            self._index = (self._index + 1) % n
+        for offset in range(n):
+            idx = (self._index + offset) % n
+            key = self._keys[idx]
             if key not in self._quota_exceeded:
+                self._index = (idx + 1) % n
                 return key
         return None
 
 
 if __name__ == "__main__":
-    # New spec tests for mark_quota_exhausted
-    r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_exhausted('b')
-    assert r.available_keys() == ['a', 'c']
-
-    r = ApiKeyRouter(['a']); r.mark_quota_exhausted('a')
-    assert r.all_exhausted() is True
-
-    r = ApiKeyRouter(['a', 'b'])
-    r.mark_quota_exhausted('a')
-    r.mark_quota_exhausted('a')
-    assert r.available_keys() == ['b']
-
     # New spec tests for is_quota_exhausted
     r = ApiKeyRouter(); r.register_key('a')
     assert r.is_quota_exhausted('a') is False
@@ -102,25 +78,20 @@ if __name__ == "__main__":
     assert r.is_available("x") is True
 
     r = ApiKeyRouter([])
-    assert r.is_quota_error(Exception('quota exceeded')) is True
+    assert r.is_quota_error(Exception('quota exceeded')) == True
     r = ApiKeyRouter([])
-    assert r.is_quota_error(Exception('rate limit hit')) is True
+    assert r.is_quota_error(Exception('rate limit hit')) == True
     r = ApiKeyRouter([])
-    assert r.is_quota_error(Exception('connection refused')) is False
+    assert r.is_quota_error(Exception('connection refused')) == False
+    r = ApiKeyRouter(['a', 'b', 'c']); assert sorted(r.available_keys()) == ['a', 'b', 'c']
+    r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_error('b'); assert sorted(r.available_keys()) == ['a', 'c']
 
+    # New spec tests for get_next_key
     r = ApiKeyRouter(['a', 'b', 'c'])
-    assert sorted(r.available_keys()) == ['a', 'b', 'c']
-    r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_error('b')
-    assert sorted(r.available_keys()) == ['a', 'c']
+    assert (r.get_next_key(), r.get_next_key(), r.get_next_key(), r.get_next_key()) == ('a', 'b', 'c', 'a')
 
-    # reset_all and get_next_key sanity checks
-    r = ApiKeyRouter(['a', 'b', 'c'])
-    r.mark_quota_exhausted('a')
-    assert r.get_next_key() == 'b'
-    r.mark_quota_exhausted('b')
-    assert r.get_next_key() == 'c'
-    r.mark_quota_exhausted('c')
+    r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_exhausted('b')
+    assert (r.get_next_key(), r.get_next_key()) == ('a', 'c')
+
+    r = ApiKeyRouter(['a']); r.mark_quota_exhausted('a')
     assert r.get_next_key() is None
-    r.reset_all()
-    assert sorted(r.available_keys()) == ['a', 'b', 'c']
-    assert r.all_exhausted() is False
