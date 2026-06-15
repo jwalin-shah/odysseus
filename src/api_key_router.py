@@ -1,23 +1,9 @@
-from __future__ import annotations
-
-class ApiKeyRouter:
-    def __init__(self, keys: list[str]):
-        self.keys = keys
-        self.index = 0
-        self.cooldown = set()
-
-    def report_quota_error(self, key: str):
-        self.cooldown.add(key)
-
-    def get_key(self) -> str | None:
-        if not self.keys:
-            return None
-        n = len(self.keys)
-        for _ in range(n):
-            key = self.keys[self.index]
-            if key not in self.cooldown:
-                self.index = (self.index + 1) % n
-                return key
-            else:
-                self.index = (self.index + 1) % n
-        return None
+def is_quota_error(exc: BaseException) -> bool:
+    """
+    Classify whether an exception represents a quota / rate-limit failure
+    from an LLM provider by inspecting message text for tokens like '429',
+    'quota', 'rate limit', or 'too many requests'.
+    """
+    message = str(exc).lower()
+    quota_tokens = ('429', 'quota', 'rate limit', 'too many requests')
+    return any(token in message for token in quota_tokens)
