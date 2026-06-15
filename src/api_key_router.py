@@ -1,16 +1,21 @@
-from typing import List
-from dataclasses import dataclass, field
+import time
+from typing import Optional
 
 
-@dataclass
 class ApiKeyState:
-    key: str
-    status: str = 'available'
-    cooldown_until: float = 0.0
+    def __init__(self, key: str, cooldown_seconds: int = 60) -> None:
+        self.key = key
+        self.cooldown_seconds = cooldown_seconds
+        self.status = "available"
+        self.failure_count = 0
+        self.cooldown_until: Optional[float] = None
 
+    def mark_exhausted(self) -> None:
+        self.status = "exhausted"
+        self.failure_count += 1
+        self.cooldown_until = time.time() + self.cooldown_seconds
 
-class ApiKeyRouter:
-    def __init__(self, keys: List[str], cooldown_seconds: int = 60) -> None:
-        self._states: List[ApiKeyState] = [ApiKeyState(key=k) for k in keys]
-        self._cursor: int = 0
-        self._cooldown_seconds: int = cooldown_seconds
+    def reset(self) -> None:
+        self.status = "available"
+        self.failure_count = 0
+        self.cooldown_until = None
