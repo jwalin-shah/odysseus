@@ -13,5 +13,13 @@ class DedupQueue:
         self._items.append(item)
         return True
 
+    def peek(self) -> object:
+        if not self._items:
+            raise IndexError("peek from empty DedupQueue")
+        return self._items[0]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
     def __iter__(self) -> Iterator[object]:
         return iter(self._items)
