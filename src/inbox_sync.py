@@ -22,6 +22,11 @@ def compute_message_hash(msg: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def filter_unseen_messages(messages: list, known_hashes: set) -> list:
+    """Return messages whose hash is not yet in known_hashes, preserving order."""
+    return [msg for msg in messages if compute_message_hash(msg) not in known_hashes]
+
+
 assert len(compute_message_hash({"id": "1", "subject": "s", "body": "b", "sender": "a", "timestamp": 1})) == 64
 assert compute_message_hash({"id": "1", "subject": "s"}) == compute_message_hash({"subject": "s", "id": "1", "noise": "x"})
 assert compute_message_hash({"id": "1"}) != compute_message_hash({"id": "2"})
