@@ -14,6 +14,14 @@ class CircuitBreaker:
     def state(self):
         return self._state
 
+    @property
+    def fail_count(self):
+        return self._failures
+
+    @property
+    def opened_at(self):
+        return self._opened_at
+
     def record_failure(self) -> None:
         self._failures += 1
         if self._failures >= self.fail_threshold:
@@ -22,8 +30,9 @@ class CircuitBreaker:
 
     def _maybe_half_open(self) -> None:
         if self._state == 'open' and (self._time_func() - self._opened_at) >= self.reset_timeout:
-            self._state = 'half-open'
+            self._state = 'half_open'
 
-    def allow_request(self) -> bool:
-        self._maybe_half_open()
-        return self._state in ('closed', 'half-open')
+    def record_success(self) -> None:
+        self._failures = 0
+        self._opened_at = None
+        self._state = 'closed'
