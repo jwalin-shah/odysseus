@@ -27,12 +27,11 @@ _PROMPT_TEMPLATES = {
         "Old text:\n{old_text}\n\n"
         "New text:\n{new_text}\n"
     ),
-    "VERIFIER": (
-        "You are a meticulous verifier. Your job is to carefully check the following task and determine "
-        "whether the provided solution is correct, complete, and satisfies all stated requirements.\n\n"
+    "JUDGE": (
+        "You are an impartial judge evaluating the following task.\n\n"
         "Task:\n{task}\n\n"
-        "Please analyze the solution step by step, identify any issues, and provide a clear verdict on "
-        "whether it meets the specification."
+        "Please carefully analyze the task and provide your assessment, including "
+        "any relevant observations, strengths, weaknesses, and a final verdict."
     ),
 }
 
@@ -54,13 +53,16 @@ def get_prompt_template(name: str) -> str:
     return _PROMPT_TEMPLATES[name]
 
 
-def _verifier_template() -> str:
-    """Return the verifier role prompt template string.
+def _judge_template() -> str:
+    """Return the judge role prompt template string.
 
-    The returned template contains a ``{task}`` placeholder that callers can
-    fill in with the specific task to be verified.
+    The template contains a ``{task}`` placeholder that callers fill in
+    with the specific task description to be evaluated by the judge.
+
+    Returns:
+        The raw judge template string.
     """
-    return get_prompt_template("VERIFIER")
+    return _PROMPT_TEMPLATES["JUDGE"]
 
 
 def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
@@ -99,3 +101,8 @@ def build_search_replace_prompt(file_path: str, old_text: str, new_text: str, in
     if instruction:
         prompt += f"\n\nAdditional instruction:\n{instruction}"
     return prompt
+
+
+assert isinstance(_judge_template(), str)
+assert '{task}' in _judge_template()
+assert 'judge' in _judge_template().lower()
