@@ -1,16 +1,15 @@
-import json
+import copy
 
-def load_from_file(path: str) -> dict:
-    """Load a JSON configuration file and return its contents as a dictionary.
-    
-    Args:
-        path: Path to the JSON file.
-    
-    Returns:
-        The parsed JSON content as a dict.
-    
-    Raises:
-        FileNotFoundError: If the specified file does not exist.
-    """
-    with open(path, 'r') as f:
-        return json.load(f)
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
