@@ -15,7 +15,7 @@ class CircuitBreaker:
         return self._state
 
     @property
-    def fail_count(self):
+    def failures(self):
         return self._failures
 
     @property
