@@ -1,11 +1,12 @@
-def merge_approval_policy_defaults(policy: dict) -> dict:
-    """Return a copy of the policy with safe defaults filled in for missing keys."""
-    defaults = {
-        'require_approval_for': ['write', 'destructive'],
-        'allow_always': True,
-    }
-    result = dict(policy)
-    for key, value in defaults.items():
-        if key not in result:
-            result[key] = value
-    return result
+def format_approval_prompt(summary: str, details: dict) -> str:
+    lines = []
+    lines.append(f"Proposed action: {summary}")
+
+    if details:
+        lines.append("Details:")
+        for key, value in details.items():
+            lines.append(f"  {key}: {value}")
+
+    lines.append("Do you approve? (y/n)")
+
+    return "\n".join(lines)
