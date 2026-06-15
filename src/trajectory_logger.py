@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field, asdict
 import json
 import os
-import time
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -9,7 +9,9 @@ class Step:
     role: str
     content: str
     metadata: dict = field(default_factory=dict)
-    timestamp: float = field(default_factory=time.time)
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    tool_calls: list = field(default_factory=list)
+    tool_results: list = field(default_factory=list)
 
 
 @dataclass
@@ -23,6 +25,18 @@ def make_trajectory(session_id: str = '', traj_id: str = '', steps: list = None)
     for backwards compatibility, plus an optional ``steps`` list."""
     tid = session_id or traj_id
     return Trajectory(id=tid, steps=list(steps) if steps else [])
+
+
+def build_step(role: str, content: str, tool_calls: list | None = None, tool_results: list | None = None, metadata: dict | None = None) -> Step:
+    """Construct a Step from raw turn data, stamping it with the current UTC ISO timestamp
+    and defaulting optional fields to empty values."""
+    return Step(
+        role=role,
+        content=content,
+        tool_calls=tool_calls if tool_calls is not None else [],
+        tool_results=tool_results if tool_results is not None else [],
+        metadata=metadata if metadata is not None else {},
+    )
 
 
 def record_turn(trajectory: Trajectory, role: str, content: str, metadata: dict = {}) -> Step:
