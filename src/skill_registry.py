@@ -2,23 +2,18 @@ from typing import List
 
 
 class Skill:
-    def __init__(self, name: str, triggers: List[str] = None, description: str = ""):
+    def __init__(self, name: str, tags: List[str] = None):
         self.name = name
-        self.triggers = triggers if triggers is not None else []
-        self.description = description
+        self.tags = tags if tags is not None else []
 
 
-def match_skill_by_query(query: str, skills: List[Skill]) -> List[Skill]:
-    query_lower = query.lower()
-    results = []
+def match_skills_by_tags(required_tags: List[str], skills: List[Skill]) -> List[Skill]:
+    if not required_tags:
+        return list(skills)
+    required_set = {tag.lower() for tag in required_tags}
+    result = []
     for skill in skills:
-        if query_lower in skill.name.lower():
-            results.append(skill)
-            continue
-        if any(query_lower in trigger.lower() for trigger in skill.triggers):
-            results.append(skill)
-            continue
-        if query_lower in skill.description.lower():
-            results.append(skill)
-            continue
-    return results
+        skill_tags = {tag.lower() for tag in skill.tags}
+        if required_set.issubset(skill_tags):
+            result.append(skill)
+    return result
