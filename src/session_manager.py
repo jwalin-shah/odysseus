@@ -1,18 +1,22 @@
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
+
+
+@dataclass
 class Session:
-    def __init__(self, name):
-        self.name = name
-        self.messages = []
+    session_id: str
+    user_id: str
+    pending_actions: List[Dict[str, Any]] = field(default_factory=list)
 
 
-def make_session(name):
-    return Session(name)
+def make_session(session_id: str, user_id: str) -> Session:
+    return Session(session_id=session_id, user_id=user_id)
 
 
-def append_message(session, role, content):
-    session.messages.append({'role': role, 'content': content})
-
-
-def get_conversation_history(session, limit=None):
-    if limit is None:
-        return list(session.messages)
-    return list(session.messages[-limit:])
+def add_pending_action(session: Session, action_id: str, action_type: str, payload: dict) -> None:
+    session.pending_actions.append({
+        'action_id': action_id,
+        'action_type': action_type,
+        'payload': payload,
+        'status': 'pending'
+    })
