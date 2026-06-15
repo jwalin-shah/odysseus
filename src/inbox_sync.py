@@ -1,17 +1,13 @@
-def update_sync_cursor(state: dict, messages: list) -> dict:
-    """Return a new state dict with last_sync_ts advanced to the maximum
-    timestamp present in messages. If messages is empty, the state is
-    returned unchanged (as a shallow copy)."""
-    new_state = dict(state)
-    if not messages:
-        return new_state
+import hashlib
+import json
 
-    max_message_ts = max(m["ts"] for m in messages)
-    current_ts = state.get("last_sync_ts")
 
-    if current_ts is not None and current_ts > max_message_ts:
-        new_state["last_sync_ts"] = current_ts
-    else:
-        new_state["last_sync_ts"] = max_message_ts
+def compute_message_hash(message: dict) -> str:
+    """Compute a deterministic SHA-256 hash for a message dict."""
+    message_str = json.dumps(message, sort_keys=True, default=str)
+    return hashlib.sha256(message_str.encode("utf-8")).hexdigest()
 
-    return new_state
+
+def filter_unseen_messages(messages: list[dict], seen_hashes: set) -> list[dict]:
+    """Return only the messages whose hash is not present in seen_hashes, preserving input order."""
+    return [msg for msg in messages if compute_message_hash(msg) not in seen_hashes]
