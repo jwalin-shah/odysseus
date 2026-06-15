@@ -70,7 +70,9 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # Per-agent direct chat + canonical quota (no worktree, no test gate)
              "tla_chat", "tla_quota",
              # Multi-model panel synthesis (budget: M3+DeepSeek+OpenRouter → Claude A)
-             "fusion"}
+             "fusion",
+             # M3-powered SEARCH/REPLACE code editor (free TokenRouter edits)
+             "m3_edit"}
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 

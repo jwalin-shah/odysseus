@@ -1244,6 +1244,23 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "m3_edit",
+            "description": "Use M3 (free TokenRouter model) to produce code edits via SEARCH/REPLACE blocks, then apply them to files on disk. Cheap alternative to using Claude for straightforward code changes. Best for: adding functions, fixing obvious bugs, updating strings/configs, small refactors. M3 reads the file context and produces exact text replacements.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Plain-English edit instruction, e.g. 'add error handling to the fetch() call in services.py'"},
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "Up to 3 file paths to include as context for M3. Relative paths resolved from cwd."},
+                    "dry_run": {"type": "boolean", "description": "If true, check SEARCH matches and report what would change without writing files."},
+                    "base_dir": {"type": "string", "description": "Base directory for resolving relative file paths (default: current working directory)."}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
 ]
 
 

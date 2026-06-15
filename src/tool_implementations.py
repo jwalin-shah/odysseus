@@ -4865,3 +4865,42 @@ async def do_fusion(content: str, owner: Optional[str] = None) -> Dict:
                 "panel": panel_name, "synth_backend": synth_backend}
     except Exception as e:
         return {"error": f"fusion failed: {e}"}
+
+
+async def do_m3_edit(content: str, owner: Optional[str] = None) -> Dict:
+    """M3-powered SEARCH/REPLACE code editor.
+
+    Uses the free MiniMax M3 model (via TokenRouter) to produce structured
+    SEARCH/REPLACE edit blocks, then applies them to files on disk.
+    Near-zero cost for straightforward code changes.
+
+    Args (JSON in content):
+        prompt   (str, required)         — plain-English edit instruction
+        files    (list[str], optional)   — up to 3 file paths to include as context
+        dry_run  (bool, optional)        — check matches without writing (default False)
+        base_dir (str, optional)         — base directory for relative file paths
+    """
+    try:
+        args = json.loads(content) if content.strip().startswith("{") else {"prompt": content}
+    except json.JSONDecodeError:
+        args = {"prompt": content}
+
+    prompt = args.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "m3_edit requires a non-empty prompt"}
+
+    files_context = args.get("files") or args.get("files_context") or []
+    dry_run = bool(args.get("dry_run", False))
+    base_dir = args.get("base_dir")
+
+    try:
+        from src.m3_editor import m3_edit
+        result = m3_edit(
+            prompt,
+            files_context=files_context if files_context else None,
+            dry_run=dry_run,
+            base_dir=base_dir,
+        )
+        return result
+    except Exception as e:
+        return {"error": f"m3_edit failed: {e}"}
