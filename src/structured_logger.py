@@ -1,15 +1,19 @@
-"""Structured logger module.
+import json
+import datetime
 
-Provides a function returning the required keys for every emitted log record.
-"""
+_configured_stream = None
 
-_REQUIRED_KEYS = ('level', 'event', 'timestamp')
+def configure_logger(stream):
+    global _configured_stream
+    _configured_stream = stream
 
-
-def required_keys() -> tuple:
-    """Return the tuple of keys that every emitted log record must contain.
-
-    Returns:
-        tuple: The required log record keys: 'level', 'event', 'timestamp'.
-    """
-    return _REQUIRED_KEYS
+def log_event(level: str, event: str, **fields) -> str:
+    record = {
+        'level': level.upper(),
+        'event': event,
+        'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+    }
+    record.update(fields)
+    line = json.dumps(record) + '\n'
+    _configured_stream.write(line)
+    return line
