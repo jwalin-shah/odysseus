@@ -1,7 +1,7 @@
 """Prompt templates for function implementation."""
 
 # Raw prompt templates indexed by name. Each template uses named format placeholders
-# (e.g. ``{spec}``, ``{scope}``) that the corresponding ``build_*`` helpers fill in.
+# (e.g. ``{func_spec}``, ``{language}``, ``{context}``) that the corresponding ``build_*`` helpers fill in.
 _PROMPT_TEMPLATES = {
     "REVIEW": (
         "You are a senior software engineer performing a thorough code review.\n\n"
@@ -16,9 +16,8 @@ _PROMPT_TEMPLATES = {
         "Provide your review as a clear, actionable list of findings with suggested improvements."
     ),
     "IMPLEMENT_FN": (
-        "You are a Python expert. Implement the following function based on the specification and signature.\n\n"
-        "Specification:\n{spec}\n\n"
-        "Signature:\n{signature}\n\n"
+        "You are a {language} expert. Implement the following function based on the specification and signature.\n\n"
+        "Function specification and signature:\n{func_spec}\n\n"
         "Context:\n{context}\n\n"
         "Please provide the complete function implementation, including any necessary imports and docstrings.\n"
     ),
@@ -27,13 +26,6 @@ _PROMPT_TEMPLATES = {
         "Search text:\n{search_text}\n\n"
         "Replace text:\n{replace_text}\n\n"
         "Replace {scope} of the search text with the replace text.\n"
-    ),
-    "IMPROVE_FILE": (
-        "You are a senior software engineer. Suggest improvements for the following file based on the specified goals.\n\n"
-        "File path: {file_path}\n\n"
-        "Current content:\n{file_content}\n\n"
-        "Improvement goals:\n{goals}\n\n"
-        "Please provide concrete, actionable improvements that address each of these goals. Show the suggested changes clearly so they can be applied to the file."
     ),
 }
 
@@ -55,19 +47,20 @@ def get_prompt_template(name: str) -> str:
     return _PROMPT_TEMPLATES[name]
 
 
-def build_implement_fn_prompt(spec: str, signature: str, context: str = "") -> str:
-    """Build a prompt asking the model to implement a function.
+def build_implement_fn_prompt(func_spec: str, language: str = "python", context: str = "") -> str:
+    """Build a prompt instructing the model to implement a function from a signature/spec.
 
     Args:
-        spec: Specification of the function.
-        signature: Function signature.
-        context: Optional context information.
+        func_spec: The function specification and signature text.
+        language: The target programming language for the implementation
+            (default: ``"python"``).
+        context: Optional additional context information to include in the prompt.
 
     Returns:
-        The formatted prompt string.
+        The formatted prompt string ready to send to a language model.
     """
     template = get_prompt_template("IMPLEMENT_FN")
-    return template.format(spec=spec, signature=signature, context=context)
+    return template.format(func_spec=func_spec, language=language, context=context)
 
 
 def build_search_replace_prompt(file_path: str, search_text: str, replace_text: str, global_replace: bool = False) -> str:
@@ -90,19 +83,3 @@ def build_search_replace_prompt(file_path: str, search_text: str, replace_text: 
         replace_text=replace_text,
         scope=scope,
     )
-
-
-def build_improve_file_prompt(file_path: str, file_content: str, goals: list) -> str:
-    """Build a prompt asking the model to suggest improvements for an existing file.
-
-    Args:
-        file_path: Path to the file that should be improved.
-        file_content: The current contents of the file.
-        goals: A list of improvement goal keywords (e.g. ``["performance"]`` or
-            ``["performance", "readability"]``).
-
-    Returns:
-        The formatted prompt string.
-    """
-    template = get_prompt_template("IMPROVE_FILE")
-    return template.format(file_path=file_path, file_content=file_content, goals=goals)
