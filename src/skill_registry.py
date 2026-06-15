@@ -1,7 +1,19 @@
-from pathlib import Path
+from dataclasses import dataclass
 
 
-def get_skills_dir() -> Path:
-    skills_dir = Path.home() / ".odysseus" / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    return skills_dir
+@dataclass
+class Skill:
+    name: str
+    description: str
+    body: str
+
+
+def validate_skill(skill: Skill) -> bool:
+    """Return True only if the Skill has non-empty name, description, and body."""
+    if not skill.name:
+        return False
+    if not skill.description:
+        return False
+    if not skill.body:
+        return False
+    return True
