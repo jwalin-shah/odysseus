@@ -1,114 +1,65 @@
-"""Thin wrapper around the inbox server's LinkedIn endpoints.
+"""Wrapper around the inbox server's LinkedIn endpoints.
 
-LinkedIn data is produced by a CDP-based scraper that runs inside the
-inbox process. The scraper is feature-flagged by the
-``INBOX_ENABLE_LINKEDIN_SCRAPER`` environment variable — when it is not
-set to ``"1"`` the LinkedIn routes are not registered, and the helpers in
-this module will raise :class:`LinkedInScannerOff` with instructions on
-how to turn the scanner on.
-
-Server (inbox process) listens on ``http://localhost:9849`` and exposes::
-
-    GET  /linkedin/dms                 -> recent DMs
-    GET  /linkedin/connections         -> recent connections
-    GET  /linkedin/profile/{person}    -> profile info
-    POST /linkedin/dm                  -> send a DM
+The inbox server (default: http://localhost:9849) only exposes LinkedIn data
+when started with ``INBOX_ENABLE_LINKEDIN_SCRAPER=1`` in its environment. Every
+public function in this module raises :class:`LinkedInScannerOff` when the
+scraper is disabled, with a message telling the caller how to enable it.
 """
-
-from __future__ import annotations
-
-import os
-from typing import Any
-
-from src.inbox_tool import inbox_get, inbox_post, InboxError
+from src.inbox_tool import inbox_get, InboxError
 
 
-_BASE_URL = "http://localhost:9849"
-_ENABLE_ENV = "INBOX_ENABLE_LINKEDIN_SCRAPER"
-_ENABLE_VALUE = "1"
+BASE_URL = "http://localhost:9849"
 
 
 class LinkedInScannerOff(Exception):
-    """Raised when a LinkedIn helper is called but the scanner is off.
+    """The inbox server's LinkedIn scraper is not enabled.
 
-    Enable the scanner by exporting ``INBOX_ENABLE_LINKEDIN_SCRAPER=1`` in
-    the environment that starts the inbox server, then restart the
-    inbox process, e.g.::
-
-        INBOX_ENABLE_LINKEDIN_SCRAPER=1 inbox-server
-
-    or via the ``.env`` file consumed by the inbox process::
-
-        INBOX_ENABLE_LINKEDIN_SCRAPER=1
+    Start the inbox server with ``INBOX_ENABLE_LINKEDIN_SCRAPER=1`` set in its
+    environment to enable it.
     """
 
 
-def check_enabled() -> bool:
-    """Return ``True`` iff ``INBOX_ENABLE_LINKEDIN_SCRAPER=1`` is set."""
-    return os.environ.get(_ENABLE_ENV) == _ENABLE_VALUE
-
-
-def _require_enabled() -> None:
-    """Raise :class:`LinkedInScannerOff` when the scanner flag is missing."""
-    if not check_enabled():
-        raise LinkedInScannerOff(
-            "LinkedIn scanner is disabled. Set INBOX_ENABLE_LINKEDIN_SCRAPER=1 "
-            "in the environment that runs the inbox server and restart it "
-            "before calling LinkedIn bridge helpers."
-        )
-
-
-def _wrap_inbox_error(action: str, exc: InboxError) -> LinkedInScannerOff:
-    """Translate an :class:`InboxError` into a :class:`LinkedInScannerOff`.
-
-    The inbox server returns errors for every LinkedIn route when the
-    scanner is disabled, so any failure on a LinkedIn call is almost
-    always a configuration problem rather than a transient network one.
-    """
-    return LinkedInScannerOff(
-        f"Inbox server refused the LinkedIn {action} — is "
-        f"INBOX_ENABLE_LINKEDIN_SCRAPER=1 set on the inbox process? "
-        f"Underlying error: {exc}"
+def _off_message() -> str:
+    return (
+        "LinkedIn scraper is disabled on the inbox server. "
+        "Restart it with INBOX_ENABLE_LINKEDIN_SCRAPER=1 set in its environment."
     )
 
 
-def get_dms(limit: int = 10) -> list[dict[str, Any]]:
+def check_enabled() -> bool:
+    """Probe the inbox server and return True iff the LinkedIn scraper is on."""
+    try:
+        inbox_get(f"{BASE_URL}/linkedin/dms", params={"limit": 1})
+        return True
+    except InboxError:
+        return False
+
+
+def get_dms(limit: int = 10) -> list:
     """Return up to ``limit`` recent LinkedIn DMs."""
-    _require_enabled()
-    try:
-        return inbox_get(f"{_BASE_URL}/linkedin/dms", params={"limit": limit})
-    except InboxError as exc:
-        raise _wrap_inbox_error("DM fetch", exc) from exc
+    if not check_enabled():
+        raise LinkedInScannerOff(_off_message())
+    return (
+        inbox_get(f"{BASE_URL}/linkedin/dms", params={"limit": limit}).get("dms", [])
+    )
 
 
-def get_connections(limit: int = 20) -> list[dict[str, Any]]:
+def get_connections(limit: int = 20) -> list:
     """Return up to ``limit`` recent LinkedIn connections."""
-    _require_enabled()
-    try:
-        return inbox_get(
-            f"{_BASE_URL}/linkedin/connections",
-            params={"limit": limit},
-        )
-    except InboxError as exc:
-        raise _wrap_inbox_error("connections fetch", exc) from exc
+    if not check_enabled():
+        raise LinkedInScannerOff(_off_message())
+    return (
+        inbox_get(f"{BASE_URL}/linkedin/connections", params={"limit": limit})
+        .get("connections", [])
+    )
 
 
-def get_profile(person: str) -> dict[str, Any]:
-    """Return profile info for ``person`` (vanity slug or user id)."""
-    _require_enabled()
-    try:
-        return inbox_get(f"{_BASE_URL}/linkedin/profile/{person}")
-    except InboxError as exc:
-        raise _wrap_inbox_error("profile fetch", exc) from exc
-
-
-def send_dm(connection_id: str, message: str) -> dict[str, Any]]:
-    """Send ``message`` to ``connection_id`` and return the server response."""
-    _require_enabled()
-    try:
-        return inbox_post(
-            f"{_BASE_URL}/linkedin/dm",
-            json={"connection_id": connection_id, "message": message},
-        )
-    except InboxError as exc:
-        raise _wrap_inbox_error("DM send", exc) from exc
+def send_dm(connection_id: str, message: str) -> dict:
+    """Send ``message`` to the LinkedIn connection identified by ``connection_id``."""
+    if not check_enabled():
+        raise LinkedInScannerOff(_off_message())
+    return inbox_get(
+        f"{BASE_URL}/linkedin/dm/send",
+        params={"connection_id": connection_id, "message": message},
+        method="POST",
+    )
