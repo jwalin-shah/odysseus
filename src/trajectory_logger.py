@@ -1,5 +1,10 @@
-def extract_assistant_turn(messages: list[dict]) -> dict:
-    for message in reversed(messages):
-        if message.get('role') == 'assistant':
-            return message
-    return {}
+from dataclasses import dataclass, field, asdict
+
+
+@dataclass(frozen=True)
+class Trajectory:
+    id: str
+    session_id: str
+    created_at: str
+    messages: list[dict]
+    metadata: dict
