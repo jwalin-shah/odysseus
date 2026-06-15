@@ -1,19 +1,14 @@
+"""Thin wrapper around the inbox server's WhatsApp routes.
+
+The inbox server (default http://localhost:9849) proxies these calls to a
+local WhatsApp client. On macOS, that requires WhatsApp.app to be running
+and Accessibility permission to be granted to the helper process.
+
+If the inbox server can't reach WhatsApp it responds with HTTP 403, or
+with an empty contact list. Both situations are surfaced here as
+`WhatsAppNotReady` so callers can handle them in one place.
 """
-Thin wrapper around the inbox server's WhatsApp routes.
 
-The inbox server is expected to be running at http://localhost:9849 and to
-expose the WhatsApp desktop client's data via macOS Accessibility APIs. As
-a result, the bridge is only usable when:
-
-  * WhatsApp.app is open on the same machine as the inbox server, and
-  * The inbox server helper has been granted the macOS Accessibility
-    permission (System Settings -> Privacy & Security -> Accessibility).
-
-If either condition is not met, GET /whatsapp/contacts will respond with
-HTTP 403 (driver unavailable / permission denied) or 200 with an empty
-list. Both cases are surfaced as `WhatsAppNotReady` so callers can show a
-clear remediation message instead of silently returning nothing.
-"""
 from __future__ import annotations
 
 from typing import Any
@@ -22,135 +17,105 @@ from src.inbox_tool import InboxError, inbox_get, inbox_post
 
 
 class WhatsAppNotReady(Exception):
-    """Raised when the WhatsApp bridge is unreachable or not authorised.
+    """Raised when the WhatsApp backend isn't usable from the inbox server.
 
-    See the module docstring for the most common causes and remediation.
+    Typical causes:
+      - WhatsApp.app isn't running on this Mac.
+      - Accessibility permission hasn't been granted to the helper
+        process used by the inbox server (System Settings -> Privacy &
+        Security -> Accessibility).
     """
 
+    INSTRUCTIONS = (
+        "To make WhatsApp ready:\n"
+        "  1. Open WhatsApp.app on this Mac and sign in.\n"
+        "  2. Open System Settings -> Privacy & Security -> Accessibility,\n"
+        "     and make sure the helper process used by the inbox server\n"
+        "     is toggled ON.\n"
+        "  3. Restart the inbox server, then retry."
+    )
 
-_READY_INSTRUCTIONS = (
-    "WhatsApp bridge is not ready. To fix:\n"
-    "  1. Open WhatsApp.app and sign in.\n"
-    "  2. Grant Accessibility permission to the inbox server helper\n"
-    "     (System Settings -> Privacy & Security -> Accessibility).\n"
-    "  3. Make sure the inbox server is running at http://localhost:9849."
-)
-
-
-def _extract_list(payload: Any, *keys: str) -> list:
-    """Best-effort normalisation: pull a list out of `payload`.
-
-    The inbox server may return a bare JSON list or a dict wrapping the
-    results under one of `keys` (e.g. {"contacts": [...]}). Anything else
-    is treated as an empty list so callers always get a list back.
-    """
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        for key in keys:
-            value = payload.get(key)
-            if isinstance(value, list):
-                return value
-    return []
+    def __init__(
+        self,
+        message: str = "WhatsApp is not ready",
+        *,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(f"{message}\n\n{self.INSTRUCTIONS}")
+        if cause is not None:
+            self.__cause__ = cause
 
 
-def _fetch_contacts() -> list:
-    """GET /whatsapp/contacts, normalising the response shape.
-
-    Returns:
-        A (possibly empty) list of contacts on success.
-
-    Raises:
-        InboxError: for transport or non-403 server errors. We deliberately
-            do not swallow these so callers can distinguish a down inbox
-            server from an unready WhatsApp bridge. A 403 is collapsed to
-            an empty list and handled by the readiness logic in the public
-            API.
-    """
-    try:
-        return _extract_list(
-            inbox_get("/whatsapp/contacts"),
-            "contacts", "data", "results",
-        )
-    except InboxError as e:
-        status = getattr(e, "status_code", None) or getattr(e, "code", None)
-        if status == 403:
-            return []
-        raise
+def _is_403(exc: BaseException) -> bool:
+    """Best-effort detection of an HTTP 403 inside an `InboxError`."""
+    status = getattr(exc, "status_code", None)
+    if status == 403:
+        return True
+    text = str(exc).lower()
+    return "403" in text or "forbidden" in text
 
 
 def check_ready() -> bool:
-    """Return True if the WhatsApp bridge appears to be operational.
+    """Return True iff WhatsApp responds with a non-empty contact list.
 
-    The bridge is considered ready when /whatsapp/contacts returns a
-    non-empty contact list with a non-403 status. This is a soft probe: it
-    never raises `WhatsAppNotReady`, so it is safe to use in startup
-    checks or status displays.
+    Diagnostic helper: never raises. Returns False when the inbox server
+    replies 403 or with an empty list. Other errors propagate as
+    `InboxError` so the caller can distinguish "WhatsApp not ready" from
+    "inbox server is broken".
     """
-    return bool(_fetch_contacts())
+    try:
+        data = inbox_get("/whatsapp/contacts")
+    except InboxError as exc:
+        if _is_403(exc):
+            return False
+        raise
+    return bool(data)
 
 
-def get_contacts() -> list:
-    """Return the list of WhatsApp contacts.
+def get_contacts() -> list[dict[str, Any]]:
+    """Return the WhatsApp contact list from the inbox server.
 
-    Raises:
-        WhatsAppNotReady: if the inbox server responds with HTTP 403
-            (Accessibility permission missing or driver unavailable) or
-            with an empty contact list (WhatsApp.app not running, not
-            signed in, or no chats yet).
+    Raises `WhatsAppNotReady` if the inbox server returns 403 or an
+    empty list — both indicate WhatsApp.app isn't usable.
     """
-    contacts = _fetch_contacts()
-    if not contacts:
-        raise WhatsAppNotReady(_READY_INSTRUCTIONS)
-    return contacts
+    try:
+        data = inbox_get("/whatsapp/contacts")
+    except InboxError as exc:
+        if _is_403(exc):
+            raise WhatsAppNotReady(
+                "Inbox server denied access to WhatsApp contacts",
+                cause=exc,
+            ) from exc
+        raise
+
+    if not data:
+        raise WhatsAppNotReady(
+            "WhatsApp returned no contacts (app closed or not signed in)"
+        )
+    return data
 
 
-def get_thread(contact_id: str, limit: int = 20) -> list:
-    """Return the messages in a WhatsApp thread.
+def get_thread(contact_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return up to `limit` messages from the thread with `contact_id`.
 
-    Args:
-        contact_id: WhatsApp chat / contact identifier as returned by
-            `get_contacts`.
-        limit: maximum number of messages to fetch. Forwarded as the
-            `limit` query parameter to the inbox server.
-
-    Returns:
-        A list of message dicts. Returns an empty list if the thread is
-        unknown or the server returned no messages. Callers are expected
-        to have already verified readiness via `get_contacts()`.
+    Gated by the same readiness check as `get_contacts`: reading a
+    thread requires WhatsApp to be accessible, so we surface
+    `WhatsAppNotReady` here too rather than letting a generic HTTP
+    error bubble up.
     """
-    if not contact_id:
-        raise ValueError("contact_id is required")
-    payload = inbox_get(
-        f"/whatsapp/messages/{contact_id}",
-        params={"limit": limit},
-    )
-    return _extract_list(payload, "messages", "data", "results")
+    if not check_ready():
+        raise WhatsAppNotReady("Cannot read thread: WhatsApp is not ready")
+    path = f"/whatsapp/messages/{contact_id}"
+    return inbox_get(path, params={"limit": limit})
 
 
-def send(to: str, body: str) -> dict:
+def send(to: str, body: str) -> dict[str, Any]:
     """Send a WhatsApp message via the inbox server.
 
-    This is a mutating action and is intentionally NOT gated by
-    `check_ready` / `get_contacts`: readiness is the caller's
-    responsibility (typically a single `get_contacts()` call at the start
-    of a session), and "explicit call" is the safeguard against an agent
-    firing off messages on its own. Do not invoke this from a loop, a
-    background poller, or any auto-reply flow without a human-in-the-loop
-    approval step upstream.
-
-    Args:
-        to: destination contact identifier (as returned by `get_contacts`).
-        body: message text to send.
-
-    Returns:
-        The inbox server's JSON response (typically includes an ack / id).
+    Intentionally NOT gated by `check_ready`: this is the explicit,
+    "I really mean to send" entry point. The caller is responsible for
+    confirming the recipient and that WhatsApp is usable. Server-side
+    errors propagate as `InboxError`.
     """
-    if not to:
-        raise ValueError("`to` is required")
-    if body is None:
-        raise ValueError("`body` is required")
-    return inbox_post(
-        "/messages/send",
-        json={"source": "whatsapp", "to": to, "body": body},
-    )
+    payload = {"source": "whatsapp", "to": to, "body": body}
+    return inbox_post("/messages/send", json=payload)
