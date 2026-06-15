@@ -1,5 +1,4 @@
 import json
-import ssl
 import subprocess
 import time
 import urllib.request
@@ -83,7 +82,7 @@ def inbox_post(path: str, body: dict) -> Any:
 # --- High-level helpers ---
 
 def get_imessage_contacts(limit: int = 20) -> list:
-    result = inbox_get("/imessage/contacts")
+    result = inbox_get("/imessage/contacts", {"limit": limit})
     contacts = result if isinstance(result, list) else result.get("contacts", result.get("data", []))
     return contacts[:limit]
 
@@ -97,9 +96,3 @@ def get_imessage_thread(chat_id: Union[int, str], limit: int = 50) -> list:
     chat_id_str = urllib.parse.quote(str(chat_id), safe="")
     result = inbox_get(f"/imessage/messages/{chat_id_str}", {"limit": limit})
     return result if isinstance(result, list) else result.get("messages", [])
-
-
-def search_imessage(query: str) -> list:
-    """Full-text search across iMessage messages."""
-    result = inbox_get("/imessage/search", {"q": query})
-    return result if isinstance(result, list) else result.get("results", result.get("messages", []))
