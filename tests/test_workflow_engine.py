@@ -10,46 +10,38 @@ from src.workflow_engine import (
 
 @patch("src.workflow_engine.inbox_tool")
 def test_inbox_summary_flow_returns_platform_unread_counts(mock_inbox):
-    mock_inbox.fetch_gmail.return_value = [
-        {"id": "1", "unread": True},
-        {"id": "2", "unread": True},
-        {"id": "3", "unread": False},
+    mock_inbox.list_email.return_value = [
+        {"id": "e1", "unread": True},
+        {"id": "e2", "unread": True},
+        {"id": "e3", "unread": False},
     ]
-    mock_inbox.fetch_slack.return_value = [
-        {"id": "10", "unread": True},
-        {"id": "11", "unread": True},
-        {"id": "12", "unread": True},
-    ]
+    mock_inbox.list_slack.return_value = [{"id": "s1", "unread": True}]
+    mock_inbox.list_teams.return_value = []
+    mock_inbox.list_sms.return_value = [{"id": "m1", "unread": True}]
 
     result = inbox_summary_flow()
 
     assert isinstance(result, dict)
-    assert result.get("gmail") == 2
-    assert result.get("slack") == 3
-    mock_inbox.fetch_gmail.assert_called_once()
-    mock_inbox.fetch_slack.assert_called_once()
+    assert result == {"email": 2, "slack": 1, "teams": 0, "sms": 1}
+    mock_inbox.list_email.assert_called_once()
+    mock_inbox.list_slack.assert_called_once()
 
 
 @patch("src.workflow_engine.inbox_tool")
-def test_reply_flow_raises_before_sending(mock_inbox):
+def test_reply_flow_raises_approval_required_before_sending(mock_inbox):
     with pytest.raises(ApprovalRequired):
-        reply_flow(
-            platform="gmail",
-            message_id="msg-42",
-            body="Thanks for your help!",
-        )
-
-    mock_inbox.send_message.assert_not_called()
+        reply_flow(message_id="m1", body="Acknowledged", platform="email")
+    mock_inbox.send_email.assert_not_called()
+    mock_inbox.send_slack.assert_not_called()
 
 
 @patch("src.workflow_engine.inbox_tool")
-def test_calendar_add_flow_raises_before_creating(mock_inbox):
+def test_calendar_add_flow_raises_approval_required_before_creating_event(mock_inbox):
     with pytest.raises(ApprovalRequired):
         calendar_add_flow(
-            title="Team Standup",
-            start="2026-02-01T10:00:00Z",
-            duration_minutes=30,
+            title="Standup",
+            start="2024-01-01T10:00:00",
+            duration_min=30,
             attendees=["alice@example.com"],
         )
-
     mock_inbox.create_event.assert_not_called()
