@@ -1,21 +1,12 @@
 """Thin wrapper around the inbox server's WhatsApp routes.
 
-The inbox server (http://localhost:9849) exposes a small HTTP surface that
-drives WhatsApp.app via macOS Accessibility. This module is a thin Python
-wrapper that:
-
-  * Translates 403 / empty responses into WhatsAppNotReady with actionable
-    instructions (open WhatsApp.app, grant Accessibility permission).
-  * Normalizes response parsing so callers get plain Python data.
-  * Keeps the surface area small and explicit: check readiness, list
-    contacts, read a thread, send a message.
-
-Routes used:
-  GET  /whatsapp/contacts
-  GET  /whatsapp/messages/{contact_id}
-  POST /messages/send
+The inbox server (default: http://localhost:9849) exposes a small
+WhatsApp bridge that proxies to WhatsApp.app on macOS via the
+Accessibility API. This module is intentionally minimal: it just
+turns the HTTP routes into Python functions and adds a single
+readiness probe so callers get a clear error message instead of
+mysterious empty results.
 """
-
 from __future__ import annotations
 
 from typing import Any
@@ -23,182 +14,121 @@ from typing import Any
 from src.inbox_tool import InboxError, inbox_get, inbox_post
 
 
-__all__ = [
-    "WhatsAppNotReady",
-    "check_ready",
-    "get_contacts",
-    "get_thread",
-    "send",
-]
+BASE_URL = "http://localhost:9849"
 
 
-class WhatsAppNotReady(Exception):
-    """Raised when the WhatsApp bridge cannot reach WhatsApp.app.
+class WhatsAppNotReady(RuntimeError):
+    """Raised when the WhatsApp bridge is not usable.
 
-    Typical causes:
-      * WhatsApp.app is not open.
-      * The process running the inbox server has not been granted
-        Accessibility permission in
-        System Settings -> Privacy & Security -> Accessibility.
+    On macOS this almost always means one of two things:
 
-    After fixing the cause, the inbox server may need to be restarted
-    so it picks up newly granted Accessibility permission.
+      1. **WhatsApp.app is not open** (or not signed in).
+      2. **Accessibility permission has not been granted** to this
+         terminal / process in
+         System Settings → Privacy & Security → Accessibility.
+
+    Fix both, then re-run. The inbox server does not surface a
+    nicely-typed error for these conditions, so we synthesise one
+    here from the symptoms we *can* see: a 403 from the bridge, or
+    a contacts list that comes back empty.
     """
 
+    DEFAULT_HINT = (
+        "WhatsApp bridge is not ready. On macOS, make sure:\n"
+        "  1. WhatsApp.app is open and signed in.\n"
+        "  2. This terminal / process has Accessibility permission\n"
+        "     in System Settings → Privacy & Security → Accessibility.\n"
+        "Then try the operation again."
+    )
 
-_INSTRUCTIONS = (
-    "To make the WhatsApp bridge ready:\n"
-    "  1. Open WhatsApp.app on this Mac and keep it running.\n"
-    "  2. Grant Accessibility permission to the process hosting the\n"
-    "     inbox server (System Settings -> Privacy & Security ->\n"
-    "     Accessibility). You may need to restart the inbox server\n"
-    "     after granting permission."
-)
+    def __init__(self, message: str = "", *, hint: str | None = None) -> None:
+        if not message:
+            message = hint or self.DEFAULT_HINT
+        super().__init__(message)
+        self.hint = hint or self.DEFAULT_HINT
 
 
-def _status_and_data(resp: Any) -> tuple[int, Any]:
-    """Return (status_code, parsed_body) from an inbox_get/post response.
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
 
-    The inbox tool may return a requests-style Response or already-parsed
-    data. Handle both shapes so this wrapper is robust to either.
-    """
-    status = getattr(resp, "status_code", 200)
-    json_fn = getattr(resp, "json", None)
-    if callable(json_fn):
-        try:
-            return status, json_fn()
-        except Exception:
-            return status, None
-    return status, resp
+def _is_forbidden(err: InboxError) -> bool:
+    """Best-effort detection of a 403 from inside an InboxError."""
+    for attr in ("status_code", "code", "status"):
+        value = getattr(err, attr, None)
+        if value == 403 or value == "403":
+            return True
+    # Fall back to substring matching against the message — InboxError
+    # may wrap a requests.HTTPError whose str() includes the status.
+    return "403" in str(err) or "forbidden" in str(err).lower()
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def check_ready() -> bool:
-    """Probe the WhatsApp bridge. Returns True if it can reach WhatsApp.
+    """Probe the WhatsApp bridge and raise if it isn't usable.
 
-    Raises WhatsAppNotReady if /whatsapp/contacts returns 403 or an empty
-    payload, or if the inbox server cannot be reached at all.
+    Returns True on success. Raises WhatsAppNotReady when the bridge
+    rejects access (403) or returns no contacts at all, which is the
+    signal that WhatsApp.app / Accessibility permission are missing.
+
+    Other errors (server down, network unreachable, etc.) propagate as
+    InboxError so the caller can distinguish "bridge is up but WhatsApp
+    is not ready" from "bridge is down entirely".
     """
     try:
-        resp = inbox_get("/whatsapp/contacts")
-    except InboxError as exc:
-        raise WhatsAppNotReady(
-            "Could not reach the inbox server to check WhatsApp readiness: "
-            f"{exc}\n{_INSTRUCTIONS}"
-        ) from exc
+        contacts = get_contacts()
+    except InboxError as err:
+        if _is_forbidden(err):
+            raise WhatsAppNotReady() from err
+        raise
 
-    status, data = _status_and_data(resp)
-
-    if status == 403:
+    if not contacts:
         raise WhatsAppNotReady(
-            "WhatsApp bridge returned 403 (forbidden).\n" + _INSTRUCTIONS
+            "WhatsApp bridge returned no contacts. "
+            "Open WhatsApp.app and ensure you are signed in."
         )
-
-    if not data:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge returned no contacts. WhatsApp.app may be closed "
-            "or no chats have been indexed yet.\n" + _INSTRUCTIONS
-        )
-
     return True
 
 
 def get_contacts() -> list:
-    """Return the list of WhatsApp contacts visible to the bridge.
-
-    Raises WhatsAppNotReady if the bridge is not ready.
-    """
-    try:
-        resp = inbox_get("/whatsapp/contacts")
-    except InboxError as exc:
-        raise WhatsAppNotReady(
-            f"Failed to fetch WhatsApp contacts: {exc}\n" + _INSTRUCTIONS
-        ) from exc
-
-    status, data = _status_and_data(resp)
-
-    if status == 403:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge returned 403 (forbidden).\n" + _INSTRUCTIONS
-        )
-
-    if not data:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge returned an empty contact list.\n" + _INSTRUCTIONS
-        )
-
-    if not isinstance(data, list):
-        raise WhatsAppNotReady(
-            "Unexpected contacts payload from WhatsApp bridge: "
-            f"{type(data).__name__}.\n" + _INSTRUCTIONS
-        )
-
-    return data
+    """Return the list of WhatsApp contacts known to the bridge."""
+    return inbox_get(f"{BASE_URL}/whatsapp/contacts")
 
 
 def get_thread(contact_id: str, limit: int = 20) -> list:
-    """Return recent messages in a WhatsApp thread.
+    """Return up to `limit` messages from the thread with `contact_id`.
 
-    Args:
-        contact_id: The contact identifier returned by get_contacts().
-        limit: Maximum number of messages to request from the server.
-
-    Raises WhatsAppNotReady if the bridge is not ready. An empty thread is
-    a valid result and is returned as an empty list.
+    Newest messages are typically last; the exact ordering is whatever
+    the inbox server hands us.
     """
-    try:
-        resp = inbox_get(
-            f"/whatsapp/messages/{contact_id}",
-            params={"limit": limit},
-        )
-    except InboxError as exc:
-        raise WhatsAppNotReady(
-            f"Failed to fetch WhatsApp thread {contact_id!r}: {exc}\n"
-            + _INSTRUCTIONS
-        ) from exc
+    if not contact_id:
+        raise ValueError("contact_id is required")
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be a positive integer")
 
-    status, data = _status_and_data(resp)
+    path = f"{BASE_URL}/whatsapp/messages/{contact_id}"
+    params: dict[str, Any] = {}
+    if limit is not None:
+        params["limit"] = int(limit)
 
-    if status == 403:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge returned 403 (forbidden).\n" + _INSTRUCTIONS
-        )
-
-    if data is None:
-        return []
-    if not isinstance(data, list):
-        raise WhatsAppNotReady(
-            "Unexpected thread payload from WhatsApp bridge: "
-            f"{type(data).__name__}.\n" + _INSTRUCTIONS
-        )
-    return data
+    return inbox_get(path, params=params or None)
 
 
 def send(to: str, body: str) -> dict:
-    """Send a WhatsApp message through the inbox server.
+    """Send a WhatsApp message via the inbox server.
 
-    This call is explicit and intentionally not gated by check_ready():
-    the caller is asserting intent to send. A 403 from the bridge is
-    still translated into WhatsAppNotReady with instructions.
+    Deliberately NOT gated by check_ready() — the inbox server
+    enforces the actual permission / app-open requirements, and
+    callers that want a pre-flight check should call check_ready()
+    themselves. This keeps `send` cheap and side-effect-only.
     """
-    try:
-        resp = inbox_post(
-            "/messages/send",
-            json={"source": "whatsapp", "to": to, "body": body},
-        )
-    except InboxError as exc:
-        raise WhatsAppNotReady(
-            f"Failed to send WhatsApp message: {exc}\n" + _INSTRUCTIONS
-        ) from exc
+    if not to:
+        raise ValueError("`to` is required")
+    if body is None:
+        raise ValueError("`body` is required")
 
-    status, data = _status_and_data(resp)
-
-    if status == 403:
-        raise WhatsAppNotReady(
-            "WhatsApp bridge refused to send (403).\n" + _INSTRUCTIONS
-        )
-
-    if isinstance(data, dict):
-        return data
-    if data is None:
-        return {}
-    return {"result": data}
+    payload = {"source": "whatsapp", "to": to, "body": body}
+    return inbox_post(f"{BASE_URL}/messages/send", json=payload)
