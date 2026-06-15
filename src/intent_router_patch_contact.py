@@ -1,50 +1,36 @@
 import re
 
-_CONTACT_RE = re.compile(
-    r'\b(?:to|from|with|about|for)\s+([A-Z][a-z]+)\b',
-    re.IGNORECASE,
-)
-
-# Fallback: any capitalized token, used when no prepositional contact is found
 _BARE_NAME_RE = re.compile(r'\b([A-Z][a-z]{1,15})\b')
-
-# Platform / channel words that look like proper nouns but are not contacts
 _SKIP_WORDS = {
-    'imessage', 'whatsapp', 'gmail', 'email', 'sms', 'text',
-    'message', 'messages', 'chat', 'chats', 'telegram', 'signal',
-    'slack', 'discord', 'facebook', 'instagram', 'twitter',
-    'snapchat', 'google', 'apple', 'microsoft', 'outlook', 'yahoo',
+    'imessage', 'whatsapp', 'gmail', 'slack', 'teams', 'telegram',
+    'signal', 'sms', 'email', 'mail', 'message', 'messages',
+    'discord', 'facebook', 'instagram', 'twitter', 'linkedin',
+    'youtube', 'tiktok', 'snapchat',
 }
 
-# Common sentence-initial / interrogative words that get capitalized
-_SKIP_PROPER = {
-    'The', 'A', 'An', 'I', 'My', 'What', 'Who', 'When',
-    'Where', 'How', 'Did', 'Does', 'Is', 'Are', 'Was', 'Were',
-    'Can', 'Could', 'Would', 'Should', 'Will', 'Do', 'Have', 'Has',
-}
+_QUESTION_WORDS = {'The', 'A', 'An', 'I', 'My', 'What', 'Who', 'When', 'Where', 'How', 'Did', 'Does'}
 
 
 def _extract_contact(text):
-    """Return the most likely contact name in *text*, or None.
+    """Extract a contact name from the text.
 
-    Strategy:
-      1. Prefer a capitalized name that follows a preposition
-         (e.g. "message Sarah", "to John").
-      2. Otherwise fall back to the first capitalized token that
-         isn't a platform/channel word or a sentence-initial word.
+    First tries the prepositional form (to/from/with <Name>) via _CONTACT_RE.
+    Falls back to the first bare capitalized word that isn't a platform
+    name or a question/stop word, so patterns like "what did Sarah say"
+    resolve to "Sarah".
     """
-    # 1. Prepositional match (e.g. "to Sarah", "from John")
+    # Existing: match after prepositions (to/from/with)
     m = _CONTACT_RE.search(text)
     if m:
         return m.group(1)
 
-    # 2. Fallback: bare capitalized name anywhere in the text
+    # Fallback: bare capitalized name not after a preposition
     for m in _BARE_NAME_RE.finditer(text):
-        word = m.group(1)
-        if word in _SKIP_PROPER:
+        w = m.group(1)
+        if w in _QUESTION_WORDS:
             continue
-        if word.lower() in _SKIP_WORDS:
+        if w.lower() in _SKIP_WORDS:
             continue
-        return word
+        return w
 
     return None
