@@ -1,6 +1,11 @@
+import os
+import sys
 import pytest
 from unittest.mock import patch
-from src.workflow_engine import (
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from workflow_engine import (
     inbox_summary_flow,
     reply_flow,
     calendar_add_flow,
@@ -8,30 +13,45 @@ from src.workflow_engine import (
 )
 
 
-@patch("src.workflow_engine.fetch_unread_counts")
-def test_inbox_summary_flow_returns_platform_counts(mock_fetch):
-    mock_fetch.return_value = {"gmail": 7, "slack": 4, "outlook": 2}
-    result = inbox_summary_flow()
+PLATFORMS = ("slack", "email", "teams")
+
+
+@patch("workflow_engine.inbox_tool")
+def test_inbox_summary_flow_returns_platform_counts(mock_inbox):
+    mock_inbox.fetch_summary.side_effect = lambda platform, user_id: {
+        "platform": platform,
+        "unread": 5,
+    }
+
+    result = inbox_summary_flow(user_id="u1")
+
     assert isinstance(result, dict)
-    assert "gmail" in result
-    assert "slack" in result
-    assert "outlook" in result
-    assert result["gmail"] == 7
-    assert result["slack"] == 4
-    assert result["outlook"] == 2
-    mock_fetch.assert_called_once()
+    for platform in PLATFORMS:
+        assert platform in result
+        assert result[platform]["unread"] == 5
+    assert mock_inbox.fetch_summary.call_count == len(PLATFORMS)
 
 
-@patch("src.workflow_engine.send_reply")
-def test_reply_flow_requires_approval(mock_send):
+@patch("workflow_engine.inbox_tool")
+def test_reply_flow_requires_approval(mock_inbox):
+    mock_inbox.send_message.return_value = {"sent": True}
+
     with pytest.raises(ApprovalRequired):
-        reply_flow(message_id="msg_1", body="Hi there")
-    mock_send.assert_not_called()
+        reply_flow(message_id="m1", body="hello", user_id="u1")
+
+    mock_inbox.send_message.assert_not_called()
 
 
-@patch("src.workflow_engine.create_event")
-def test_calendar_add_flow_requires_approval(mock_create):
-    event = {"title": "Standup", "start": "2024-06-01T10:00"}
+@patch("workflow_engine.inbox_tool")
+def test_calendar_add_flow_requires_approval(mock_inbox):
+    mock_inbox.create_event.return_value = {"event_id": "e1"}
+
     with pytest.raises(ApprovalRequired):
-        calendar_add_flow(event)
-    mock_create.assert_not_called()
+        calendar_add_flow(
+            title="Standup",
+            start="2024-01-01T10:00:00Z",
+            end="2024-01-01T10:30:00Z",
+            user_id="u1",
+        )
+
+    mock_inbox.create_event.assert_not_called()
