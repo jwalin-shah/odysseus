@@ -1,47 +1,63 @@
 def confirm_and_execute(result: HarnessResult, confirmed: bool = False) -> HarnessResult:
-    """If result.needs_approval and not confirmed, return it unchanged (caller shows approval UI).
-    If confirmed=True, execute the pending action and return the final result."""
-    # Nothing pending — no gating required.
+    """Gate a write action behind explicit user confirmation.
+
+    Behavior:
+      * If ``result.needs_approval`` is False, return ``result`` unchanged.
+      * If ``result.needs_approval`` is True and ``confirmed`` is False,
+        return ``result`` unchanged so the caller can surface an approval UI.
+      * If ``result.needs_approval`` is True and ``confirmed`` is True,
+        look up the action function on ``src.inbox_tool`` by name (via the
+        ``fn`` key in ``approval_payload``), invoke it with the remaining
+        payload keys as kwargs, and return a fresh ``HarnessResult``
+        describing the outcome.
+    """
+    # Read-only or already-executed result: nothing pending, hand it back.
     if not result.needs_approval:
         return result
-    # Approval not yet given — let the caller surface the prompt.
+    # Pending approval but caller hasn't confirmed yet.
     if not confirmed:
         return result
 
+    # Lazy import: keeps write-side modules off the read-only import path.
     from src import inbox_tool
 
-    fn_name = result.approval_payload.get("fn")
+    payload = result.approval_payload or {}
+    fn_name = payload.get("fn")
+
     if not fn_name:
-        result.content = "Approval payload is missing the 'fn' key; cannot execute."
-        result.needs_approval = False
-        result.action_taken = "approval_error:missing_fn"
-        return result
+        return HarnessResult(
+            content="Approval payload is missing the 'fn' dispatch key; cannot execute.",
+            action_taken="confirm_and_execute:missing_fn",
+            needs_approval=False,
+            approval_payload={},
+        )
 
     fn = getattr(inbox_tool, fn_name, None)
-    if fn is None:
-        result.content = f"Function '{fn_name}' not found in src.inbox_tool."
-        result.needs_approval = False
-        result.action_taken = f"approval_error:unknown_fn:{fn_name}"
-        return result
+    if fn is None or not callable(fn):
+        return HarnessResult(
+            content=f"Unknown action function '{fn_name}' on src.inbox_tool.",
+            action_taken=f"confirm_and_execute:unknown_fn:{fn_name}",
+            needs_approval=False,
+            approval_payload={},
+        )
 
-    # All payload keys except 'fn' are forwarded as kwargs to the resolved callable.
-    kwargs = {k: v for k, v in result.approval_payload.items() if k != "fn"}
+    # Rebuild kwargs from the payload, dropping the dispatch key.
+    # Anything else (e.g. {"to": "mom", "body": "..."}) is forwarded as-is.
+    kwargs = {k: v for k, v in payload.items() if k != "fn"}
+
     try:
-        output = fn(**kwargs)
-    except TypeError as e:
-        # Most likely a kwarg name mismatch — surface it loudly.
-        result.content = f"Argument mismatch calling {fn_name}({kwargs}): {e}"
-        result.needs_approval = False
-        result.action_taken = f"approval_error:bad_args:{fn_name}"
-        return result
-    except Exception as e:
-        result.content = f"Execution of {fn_name} failed: {e}"
-        result.needs_approval = False
-        result.action_taken = f"approval_error:exception:{fn_name}"
-        return result
+        outcome = fn(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - surface failure to caller, don't bubble
+        return HarnessResult(
+            content=f"Action '{fn_name}' failed: {exc}",
+            action_taken=f"confirm_and_execute:error:{fn_name}",
+            needs_approval=False,
+            approval_payload={},
+        )
 
-    # Success — promote the result out of the approval-pending state.
-    result.content = str(output) if output is not None else f"Action '{fn_name}' completed."
-    result.needs_approval = False
-    result.action_taken = f"executed:{fn_name}"
-    return result
+    return HarnessResult(
+        content=str(outcome),
+        action_taken=f"executed:{fn_name}",
+        needs_approval=False,
+        approval_payload={},
+    )
