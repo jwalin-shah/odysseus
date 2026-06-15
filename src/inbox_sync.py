@@ -1,27 +1,13 @@
+import hashlib
 import json
-import os
-import tempfile
 
 
-def save_sync_state(path: str, seen_hashes: set) -> None:
-    """Atomically write a JSON-encoded set of seen message fingerprints to disk.
+def compute_message_hash(message: dict) -> str:
+    """Compute a stable hash for a message dictionary."""
+    message_str = json.dumps(message, sort_keys=True, default=str)
+    return hashlib.sha256(message_str.encode("utf-8")).hexdigest()
 
-    Creates parent directories as needed.
-    """
-    parent_dir = os.path.dirname(path)
-    if parent_dir:
-        os.makedirs(parent_dir, exist_ok=True)
 
-    # Use mkstemp to get a secure temp file in the same directory
-    # so that os.replace is an atomic operation on the same filesystem.
-    fd, tmp_path = tempfile.mkstemp(dir=parent_dir or ".")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(list(seen_hashes), f)
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+def filter_new_messages(messages: list, seen_hashes: set) -> list:
+    """Return the subset of messages whose hash is not in seen_hashes, preserving order."""
+    return [msg for msg in messages if compute_message_hash(msg) not in seen_hashes]
