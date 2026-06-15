@@ -1,5 +1,9 @@
-# Harness Routing
+# Odysseus Request Routing
 
-How Odysseus turns a user message into a tool call or model response.
+How a user message travels from text to executed action.
 
-## Pipeline Overview
+## 1. Text → IntentResult
+
+`intent_router.classify(text, context)` parses the raw user input and returns
+an `IntentResult` describing *what* the user wants, *which tool* it maps to,
+and *how risky* the action is.
