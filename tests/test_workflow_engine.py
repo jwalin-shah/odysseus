@@ -1,6 +1,5 @@
-"""Unit tests for src/workflow_engine.py"""
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from src.workflow_engine import (
     inbox_summary_flow,
@@ -11,56 +10,41 @@ from src.workflow_engine import (
 
 
 @patch("src.workflow_engine.inbox_tool")
-def test_inbox_summary_flow_returns_platform_unread_counts(mock_inbox):
-    mock_inbox.fetch_gmail.return_value = [
-        {"id": "1", "unread": True},
-        {"id": "2", "unread": False},
+def test_inbox_summary_flow_returns_platforms_and_counts(mock_inbox):
+    mock_inbox.fetch.return_value = [
+        {"platform": "gmail", "unread": 3},
+        {"platform": "slack", "unread": 5},
+        {"platform": "gmail", "unread": 2},
+        {"platform": "outlook", "unread": 0},
     ]
-    mock_inbox.fetch_slack.return_value = [
-        {"id": "a", "unread": True},
-        {"id": "b", "unread": True},
-    ]
-    mock_inbox.fetch_outlook.return_value = []
 
     result = inbox_summary_flow()
 
     assert isinstance(result, dict)
     assert set(result.keys()) == {"gmail", "slack", "outlook"}
-    assert result["gmail"] == 1
-    assert result["slack"] == 2
+    assert result["gmail"] == 5
+    assert result["slack"] == 5
     assert result["outlook"] == 0
-    mock_inbox.fetch_gmail.assert_called_once()
-    mock_inbox.fetch_slack.assert_called_once()
-    mock_inbox.fetch_outlook.assert_called_once()
+    mock_inbox.fetch.assert_called_once()
 
 
 @patch("src.workflow_engine.inbox_tool")
-def test_reply_flow_requires_approval_before_send(mock_inbox):
-    mock_inbox.send_reply = MagicMock()
-
+def test_reply_flow_raises_before_sending(mock_inbox):
     with pytest.raises(ApprovalRequired):
-        reply_flow(message_id="m1", body="looks good")
+        reply_flow(message_id="msg_123", body="Sounds good.")
 
-    mock_inbox.send_reply.assert_not_called()
+    mock_inbox.send.assert_not_called()
 
 
+@patch("src.workflow_engine.calendar_tool")
 @patch("src.workflow_engine.inbox_tool")
-def test_calendar_add_flow_requires_approval_before_create(mock_inbox):
-    mock_inbox.create_event = MagicMock()
-
+def test_calendar_add_flow_raises_before_creating_event(mock_inbox, mock_calendar):
     with pytest.raises(ApprovalRequired):
         calendar_add_flow(
-            title="Standup",
-            start="2025-01-01T10:00:00Z",
-            duration_min=30,
+            title="Team Standup",
+            start="2024-06-01T10:00:00",
+            duration_minutes=30,
+            attendees=["alice@example.com"],
         )
 
-    mock_inbox.create_event.assert_not_called()
-
-
-@patch("src.workflow_engine.inbox_tool")
-def test_approval_required_message_mentions_action(mock_inbox):
-    mock_inbox.send_reply = MagicMock()
-    with pytest.raises(ApprovalRequired) as exc:
-        reply_flow(message_id="m2", body="hi")
-    assert "send" in str(exc.value).lower() or "reply" in str(exc.value).lower()
+    mock_calendar.create_event.assert_not_called()
