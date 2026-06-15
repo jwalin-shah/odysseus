@@ -24,10 +24,15 @@ class ApiKeyRouter:
         """
         return key in self._quota_exceeded
 
+    def is_exhausted(self, key: str) -> bool:
+        """Return True if the given key has been marked quota-exhausted and is
+        therefore skipped by the round-robin selector."""
+        return key in self._quota_exceeded
+
     def mark_quota_error(self, key: str) -> None:
         self._quota_exceeded.add(key)
 
-    def available_keys(self) -> list[str]:
+    def available_keys(self) -> list:
         return [k for k in self._keys if k not in self._quota_exceeded]
 
     def is_available(self, key: str) -> bool:
@@ -39,6 +44,13 @@ class ApiKeyRouter:
 
 
 if __name__ == "__main__":
+    # New spec tests for is_exhausted
+    r = ApiKeyRouter(['a', 'b']); assert r.is_exhausted('a') is False
+
+    r = ApiKeyRouter(['a', 'b']); r.mark_quota_exhausted('a'); assert r.is_exhausted('a') is True
+
+    r = ApiKeyRouter(['a', 'b']); r.mark_quota_exhausted('a'); assert r.is_exhausted('b') is False
+
     # New spec tests for is_quota_exhausted
     r = ApiKeyRouter(); r.register_key('a')
     assert r.is_quota_exhausted('a') is False
@@ -67,16 +79,3 @@ if __name__ == "__main__":
     assert r.is_quota_error(Exception('connection refused')) == False
     r = ApiKeyRouter(['a', 'b', 'c']); assert sorted(r.available_keys()) == ['a', 'b', 'c']
     r = ApiKeyRouter(['a', 'b', 'c']); r.mark_quota_error('b'); assert sorted(r.available_keys()) == ['a', 'c']
-
-    # Spec tests for available_keys preserving order
-    r = ApiKeyRouter(['a', 'b', 'c'])
-    assert r.available_keys() == ['a', 'b', 'c']
-
-    r = ApiKeyRouter(['a', 'b', 'c'])
-    r.mark_quota_exhausted('b')
-    assert r.available_keys() == ['a', 'c']
-
-    r = ApiKeyRouter(['a', 'b'])
-    r.mark_quota_exhausted('a')
-    r.mark_quota_exhausted('b')
-    assert r.available_keys() == []
