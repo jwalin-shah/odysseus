@@ -12,14 +12,12 @@ MODEL_PRICING = {
 }
 
 
-def _entry_cost(entry: dict) -> float:
-    pricing = MODEL_PRICING.get(entry.get("model"))
-    if not pricing:
-        return 0.0
-    input_tokens = max(0, int(entry.get("input_tokens", 0)))
-    output_tokens = max(0, int(entry.get("output_tokens", 0)))
-    return input_tokens * pricing["input_per_token"] + output_tokens * pricing["output_per_token"]
-
-
-def estimate_cost(log: list[dict]) -> float:
-    return sum(_entry_cost(entry) for entry in log)
+def estimate_cost(trajectory_log) -> float:
+    total = 0.0
+    for entry in trajectory_log:
+        pricing = MODEL_PRICING.get(entry.get("model"))
+        if not pricing:
+            continue
+        total += max(0, int(entry.get("input_tokens", 0))) * pricing["input_per_token"]
+        total += max(0, int(entry.get("output_tokens", 0))) * pricing["output_per_token"]
+    return total
