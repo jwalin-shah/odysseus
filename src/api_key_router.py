@@ -1,40 +1,22 @@
-"""API key router utilities for handling quota and rate-limit errors."""
+def recover_expired_keys(state: dict, now: float) -> int:
+    """Clear expired cooldown entries and return the number of keys recovered.
 
-
-def is_quota_error(status_code: int, body: str) -> bool:
-    """Return True when an HTTP response indicates a quota / rate-limit error requiring key rotation.
-
-    Detection is based on:
-    - HTTP status codes commonly associated with quota or rate-limit issues
-      (e.g. 429 Too Many Requests, 402 Payment Required).
-    - Presence of quota / rate-limit related keywords in the response body
-      (case-insensitive).
+    For each entry in ``state``, if its associated info dict contains an
+    ``exhausted_until`` value that is less than or equal to ``now``, the
+    ``exhausted_until`` field is removed and the recovery counter is
+    incremented by one.
 
     Args:
-        status_code: The HTTP status code from the response.
-        body: The response body as a string.
+        state: Mapping of key identifiers to their metadata dictionaries.
+        now: Current time (e.g., epoch seconds) used to evaluate expiry.
 
     Returns:
-        True if the response indicates a quota or rate-limit error, False otherwise.
+        The number of keys whose cooldown entries were cleared.
     """
-    # Status codes that commonly indicate quota / rate-limit issues.
-    quota_status_codes = {429, 402}
-
-    # Keywords / phrases that typically appear in quota / rate-limit error responses.
-    quota_indicators = (
-        "rate limit",
-        "rate_limit",
-        "ratelimit",
-        "quota",
-        "insufficient_quota",
-        "quota_exceeded",
-        "too many requests",
-        "request limit",
-        "limit reached",
-    )
-
-    if status_code in quota_status_codes:
-        return True
-
-    body_lower = body.lower() if body else ""
-    return any(indicator in body_lower for indicator in quota_indicators)
+    recovered = 0
+    for key_info in state.values():
+        if isinstance(key_info, dict) and "exhausted_until" in key_info:
+            if key_info["exhausted_until"] <= now:
+                del key_info["exhausted_until"]
+                recovered += 1
+    return recovered
