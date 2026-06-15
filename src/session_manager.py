@@ -1,4 +1,11 @@
+from src.session import Session
+
+
 class SessionManager:
-    def __init__(self, storage_dir: str = '/tmp/odysseus_sessions') -> None:
-        self.storage_dir = storage_dir
+    def __init__(self):
         self._sessions = {}
+
+    def get_or_create_session(self, session_id: str) -> Session:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = Session(session_id)
+        return self._sessions[session_id]
