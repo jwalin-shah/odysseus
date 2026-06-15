@@ -1,21 +1,34 @@
-def levenshtein(s1, s2):
-    if len(s1) < len(s2):
-        return levenshtein(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
+def levenshtein(a: str, b: str) -> int:
+    """Compute the Levenshtein edit distance between two strings.
 
-    previous_row = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
+    Uses an O(len(a) * len(b)) dynamic programming table where
+    dp[i][j] is the edit distance between a[:i] and b[:j].
+    """
+    m, n = len(a), len(b)
 
-    return previous_row[-1]
+    # Build a (m+1) x (n+1) DP table
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+
+    # Base cases: transforming empty string requires i inserts or j deletes
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+
+    # Fill in the rest of the table
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = 1 + min(
+                    dp[i - 1][j],      # deletion from a
+                    dp[i][j - 1],      # insertion into a
+                    dp[i - 1][j - 1],  # substitution
+                )
+
+    return dp[m][n]
 
 
-def test_levenshtein_empty_strings() -> None:
-    assert levenshtein('', '') == 0
+assert levenshtein('kitten', 'sitting') == 3
+assert levenshtein('', '') == 0
