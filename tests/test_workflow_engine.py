@@ -1,11 +1,7 @@
-import os
-import sys
+"""Unit tests for src.workflow_engine — uses pytest + unittest.mock.patch."""
 import pytest
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from workflow_engine import (
+from src.workflow_engine import (
     inbox_summary_flow,
     reply_flow,
     calendar_add_flow,
@@ -13,45 +9,40 @@ from workflow_engine import (
 )
 
 
-PLATFORMS = ("slack", "email", "teams")
+def test_inbox_summary_flow_returns_platform_keys_and_unread_counts():
+    """Summary should be a dict keyed by platform with integer unread counts."""
+    slack_messages = [
+        {"id": "s1", "unread": True},
+        {"id": "s2", "unread": False},
+        {"id": "s3", "unread": True},
+    ]
+    email_messages = [
+        {"id": "e1", "unread": True},
+        {"id": "e2", "unread": False},
+    ]
 
-
-@patch("workflow_engine.inbox_tool")
-def test_inbox_summary_flow_returns_platform_counts(mock_inbox):
-    mock_inbox.fetch_summary.side_effect = lambda platform, user_id: {
-        "platform": platform,
-        "unread": 5,
-    }
-
-    result = inbox_summary_flow(user_id="u1")
+    with patch("src.workflow_engine.fetch_slack_inbox", return_value=slack_messages), \
+         patch("src.workflow_engine.fetch_email_inbox", return_value=email_messages):
+        result = inbox_summary_flow()
 
     assert isinstance(result, dict)
-    for platform in PLATFORMS:
-        assert platform in result
-        assert result[platform]["unread"] == 5
-    assert mock_inbox.fetch_summary.call_count == len(PLATFORMS)
+    assert set(result.keys()) == {"slack", "email"}
+    assert result["slack"] == 2
+    assert result["email"] == 1
 
 
-@patch("workflow_engine.inbox_tool")
-def test_reply_flow_requires_approval(mock_inbox):
-    mock_inbox.send_message.return_value = {"sent": True}
-
-    with pytest.raises(ApprovalRequired):
-        reply_flow(message_id="m1", body="hello", user_id="u1")
-
-    mock_inbox.send_message.assert_not_called()
+def test_reply_flow_raises_approval_required_before_sending():
+    """reply_flow must halt on ApprovalRequired and never invoke send_reply."""
+    with patch("src.workflow_engine.send_reply") as mock_send:
+        with pytest.raises(ApprovalRequired):
+            reply_flow(message_id="msg_001", body="Looks good, thanks!")
+        mock_send.assert_not_called()
 
 
-@patch("workflow_engine.inbox_tool")
-def test_calendar_add_flow_requires_approval(mock_inbox):
-    mock_inbox.create_event.return_value = {"event_id": "e1"}
-
-    with pytest.raises(ApprovalRequired):
-        calendar_add_flow(
-            title="Standup",
-            start="2024-01-01T10:00:00Z",
-            end="2024-01-01T10:30:00Z",
-            user_id="u1",
-        )
-
-    mock_inbox.create_event.assert_not_called()
+def test_calendar_add_flow_raises_approval_required_before_creating():
+    """calendar_add_flow must halt on ApprovalRequired and never create events."""
+    event = {"title": "Sprint Planning", "start": "2026-02-01T09:00:00Z"}
+    with patch("src.workflow_engine.create_calendar_event") as mock_create:
+        with pytest.raises(ApprovalRequired):
+            calendar_add_flow(event=event)
+        mock_create.assert_not_called()
