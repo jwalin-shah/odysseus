@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -45,14 +46,16 @@ DOCS_TOTAL_CAP = 30000       # whole preamble
 REGISTRY = {
     # bypass is safe here: coder runs only inside a disposable worktree with a
     # pytest gate; red = discarded
+    # Native claude binary tools — use -p --dangerously-skip-permissions which gives full tool use
+    # (tools work fine in -p mode; -p just means non-interactive, not tool-less)
     "claude":        {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
-    "claude-b":      {"argv": ["claude-b-p", "{prompt}"], "kind": "coder"},  # account-B fallback when pioneer/opencode down
+    "claude-b":      {"argv": ["claude-b-p", "{prompt}"], "kind": "coder"},
+    # opencode/pioneer routes — kept as fallback but currently unreliable (server errors Jun 2026)
     "opencode-opus": {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder"},
-    # Short aliases: ca = claude opus (best), cb = claude sonnet (mid), cc = haiku (fast).
-    # All three go through OpenCode+Pioneer so they share one API key and quota bucket.
-    "ca":            {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder", "alias_of": "opencode-opus"},
-    "cb":            {"argv": ["opencode", "run", "-m", "pioneer/claude-sonnet-4-6", "{prompt}"], "kind": "coder"},
-    "cc":            {"argv": ["opencode", "run", "-m", "pioneer/claude-haiku-4-5", "{prompt}"], "kind": "coder"},
+    # ca/cb/cc: remap to native claude binaries; opencode kept as secondary
+    "ca":            {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
+    "cb":            {"argv": ["claude-b-p", "{prompt}"], "kind": "coder"},
+    "cc":            {"argv": ["claude-b-p", "{prompt}"], "kind": "coder"},
     # codex refuses to run outside a trusted git repo; --skip-git-repo-check
     # lets it run anywhere. We route through Pioneer (matching ca/cb/cc)
     # so the ChatGPT plan model restrictions don't bite us.
@@ -276,6 +279,47 @@ def run_tool(tool, prompt, cwd, timeout):
     argv = [a.replace("{prompt}", prompt) for a in REGISTRY[tool]["argv"]]
     env = pioneer_env() if tool.startswith("opencode") else None
     t0 = time.time()
+
+    # For native claude tools, use tmux so agent gets a real TTY
+    # Prompt is written to a tempfile and piped via stdin to avoid shell arg length limits
+    is_claude_native = tool in ("claude", "claude-b", "ca", "cb", "cc")
+    if is_claude_native and shutil.which("tmux"):
+        import tempfile, uuid
+        session = f"ody-{uuid.uuid4().hex[:8]}"
+        outfile = tempfile.mktemp(suffix=".ody.out")
+        promptfile = tempfile.mktemp(suffix=".ody.prompt")
+        try:
+            pathlib.Path(promptfile).write_text(prompt)
+            # Build the base command (argv without the prompt arg)
+            base_cmd = [a for a in argv if a != prompt]
+            # Pipe prompt file to stdin: cat prompt | claude --dangerously-skip-permissions
+            bash_cmd = (
+                f"cat {shlex.quote(promptfile)} | "
+                f"{' '.join(shlex.quote(a) for a in base_cmd)} "
+                f">{shlex.quote(outfile)} 2>&1"
+            )
+            launch = ["tmux", "new-session", "-d", "-s", session, "-c", str(cwd),
+                      "--", "bash", "-c", bash_cmd]
+            subprocess.run(launch, check=True, timeout=10)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(2)
+                alive = subprocess.run(["tmux", "has-session", "-t", session],
+                                       capture_output=True).returncode == 0
+                if not alive:
+                    break
+            else:
+                subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+                return 124, "", f"timeout after {timeout}s", time.time() - t0
+            out = pathlib.Path(outfile).read_text(errors="replace") if pathlib.Path(outfile).exists() else ""
+            return 0, out, "", time.time() - t0
+        except Exception:
+            pass  # fall through to subprocess
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+            for f in (outfile, promptfile):
+                pathlib.Path(f).unlink(missing_ok=True)
+
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
                            timeout=timeout, env=env)
