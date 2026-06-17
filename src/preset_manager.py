@@ -40,7 +40,7 @@ Structure ideas clearly but allow creative freedom in presentation. Aim for quan
         "reason": {
             "name": "Reason",
             "temperature": 0.3,
-            "max_tokens": 6000,
+            "max_tokens": 65536,
             "system_prompt": """You are a systematic reasoning assistant.
 
 Structure all responses using clear logical progression:

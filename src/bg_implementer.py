@@ -319,8 +319,8 @@ async def run_implementation_pass(finding_id: str, session_name: str, report_con
         if not wtpath:
             return {"success": False, "error": "Failed to create worktree"}
 
-        # 2. Truncate report to 6000 chars
-        truncated_report = report_content[:6000]
+        # 2. Pass full report (M3 has 1M+ context; truncation was lossy)
+        truncated_report = report_content[:120000]
 
         # 3. Ask M3 for implementation
         prompt = (

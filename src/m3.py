@@ -36,7 +36,7 @@ def api_key():
     return cfg["provider"]["tokenrouter"]["options"]["apiKey"]
 
 
-def complete(prompt, model=DEFAULT_MODEL, system=None, max_tokens=4096, timeout=180):
+def complete(prompt, model=DEFAULT_MODEL, system=None, max_tokens=65536, timeout=300):
     messages = ([{"role": "system", "content": system}] if system else [])
     messages.append({"role": "user", "content": prompt})
     req = urllib.request.Request(
@@ -57,7 +57,7 @@ def main(argv=None):
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--system", default="You are a precise technical analyst. "
                    "You never produce code patches; you diagnose, summarize, and explain.")
-    p.add_argument("--max-tokens", type=int, default=4096)
+    p.add_argument("--max-tokens", type=int, default=65536)
     args = p.parse_args(argv)
 
     prompt = args.prompt

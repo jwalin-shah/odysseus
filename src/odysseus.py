@@ -39,8 +39,8 @@ DOCS = [
     "SESSION_BRIEF.md", "ROADMAP.md", "V2_ADVANCED_RESEARCH.md",
     "README.md", "ACKNOWLEDGMENTS.md",
 ]
-DOC_CHAR_CAP = 6000          # per doc
-DOCS_TOTAL_CAP = 30000       # whole preamble
+DOC_CHAR_CAP = 30000         # per doc — models have large contexts, don't truncate docs
+DOCS_TOTAL_CAP = 120000      # whole preamble
 
 # argv templates; {prompt} is substituted. kind: coder | analyst | research
 REGISTRY = {
