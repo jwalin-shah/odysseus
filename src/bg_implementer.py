@@ -175,6 +175,10 @@ def parse_m3_response(response_text: str) -> Optional[Dict[str, Any]]:
 
     Returns None if neither format is found.
     """
+    if response_text.strip() == "CANNOT_PATCH":
+        logger.warning("M3 response declined to patch: CANNOT_PATCH")
+        return None
+
     import re
     try:
         result = {
@@ -282,19 +286,24 @@ async def run_implementation_pass(finding_id: str, session_name: str, report_con
             f"RESEARCH REPORT:\n{truncated_report}\n\n"
             f"TASK:\n"
             f"1. Choose ONE implementable improvement (feature, bugfix, refactor, or test).\n"
-            f"2. Write the fix using the strict Aider SEARCH/REPLACE format.\n"
-            f"3. Write the test for the fix using the TEST_FILE format.\n\n"
-            f"FORMAT RULES:\n"
-            f"The SEARCH section must EXACTLY MATCH the existing file content character for character.\n\n"
+            f"2. Emit the fix using ONLY the strict Aider SEARCH/REPLACE format below.\n"
+            f"3. Emit a pytest regression using the TEST_FILE format below.\n\n"
+            f"OUTPUT CONTRACT:\n"
+            f"- Output only edit blocks and the test file. No prose, markdown, or analysis.\n"
+            f"- Do NOT emit unified diffs, diff fences, git patches, hunk headers, or +/- line prefixes.\n"
+            f"- Do NOT use placeholder paths. Every path must be a real repository-relative path.\n"
+            f"- The SEARCH section must be copied verbatim from the current file and must match exactly once.\n"
+            f"- If you cannot produce an exact SEARCH block and a complete TEST_FILE, output exactly the word: CANNOT_PATCH\n\n"
+            f"EDIT FORMAT:\n"
             f"path/to/existing_file.py\n"
             f"<<<< SEARCH\n"
-            f"exact lines to find and replace\n"
+            f"exact existing lines to find and replace\n"
             f"====\n"
-            f"new lines to insert\n"
+            f"replacement lines\n"
             f">>>> REPLACE\n\n"
             f"TEST_FILE: path/to/test_file.py\n"
             f"TEST_CONTENT:\n"
-            f"<pytest test file body>\n"
+            f"<complete pytest test file body>\n"
         )
 
         base_url = "http://127.0.0.1:7860"
