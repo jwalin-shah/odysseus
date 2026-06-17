@@ -180,37 +180,83 @@ def parse_m3_response(response_text: str) -> Optional[Dict[str, Any]]:
         return None
 
     import re
+    import json as _json
     try:
         result = {
             "file_path": None,
             "diff_or_body": None,
             "edits": [],
+            "unified_diff": None,   # populated when Format 0 matched
             "test_path": None,
             "test_body": None,
         }
 
-        # ── Format 1: FILE / CONTENT ─────────────────────────────────
-        # Match the FILE: line followed by a CONTENT: block (until blank
-        # line or end of string).
-        file_content_re = re.compile(
-            r"^FILE:\s*(\S+)\s*\nCONTENT:\s*\n(.*?)(?=\n\s*\n|\Z)",
-            re.MULTILINE | re.DOTALL,
+        # ── Format 0: unified diff inside ```diff fence (preferred) ──
+        diff_fence_re = re.compile(
+            r"```diff\s*\n(.*?)```",
+            re.DOTALL,
         )
-        m = file_content_re.search(response_text)
-        if m:
-            result["file_path"] = m.group(1).strip()
-            result["diff_or_body"] = m.group(2).rstrip()
-            # Surface the single-file edit as a one-element edits list so
-            # downstream code that already iterates ``edits`` keeps working.
-            result["edits"].append({
-                "file_path": result["file_path"],
-                "search": "",
-                "replace": result["diff_or_body"],
-            })
+        diff_match = diff_fence_re.search(response_text)
+        if diff_match:
+            diff_text = diff_match.group(1)
+            from src.patch_validator import validate_unified_diff, DiffValidationError
+            try:
+                validate_unified_diff(diff_text)
+                # Extract path from the --- a/<path> header
+                path_m = re.search(r"^--- a/(\S+)", diff_text, re.MULTILINE)
+                if path_m:
+                    result["file_path"] = path_m.group(1)
+                    result["unified_diff"] = diff_text
+                    result["diff_or_body"] = diff_text
+                    result["edits"].append({
+                        "file_path": result["file_path"],
+                        "search": None,    # sentinel: apply via unified diff
+                        "replace": None,
+                        "unified_diff": diff_text,
+                    })
+            except DiffValidationError as exc:
+                logger.warning("Malformed unified diff in response: %s", exc)
+                # Fall through to other formats
+
+        # ── Format 0b: JSON fallback {path, find, replace} ───────────
+        if not result["file_path"]:
+            json_re = re.compile(
+                r'^\s*(\{[^{}]*"path"[^{}]*"find"[^{}]*"replace"[^{}]*\})\s*$',
+                re.MULTILINE,
+            )
+            json_match = json_re.search(response_text)
+            if json_match:
+                try:
+                    payload = _json.loads(json_match.group(1))
+                    if all(k in payload for k in ("path", "find", "replace")):
+                        result["file_path"] = payload["path"]
+                        result["diff_or_body"] = None
+                        result["edits"].append({
+                            "file_path": payload["path"],
+                            "search": payload["find"],
+                            "replace": payload["replace"],
+                            "json_payload": payload,  # sentinel for applier
+                        })
+                except (_json.JSONDecodeError, KeyError):
+                    pass
+
+        # ── Format 1: FILE / CONTENT ─────────────────────────────────
+        if not result["file_path"]:
+            file_content_re = re.compile(
+                r"^FILE:\s*(\S+)\s*\nCONTENT:\s*\n(.*?)(?=\n\s*\n|\Z)",
+                re.MULTILINE | re.DOTALL,
+            )
+            m = file_content_re.search(response_text)
+            if m:
+                result["file_path"] = m.group(1).strip()
+                result["diff_or_body"] = m.group(2).rstrip()
+                result["edits"].append({
+                    "file_path": result["file_path"],
+                    "search": "",
+                    "replace": result["diff_or_body"],
+                })
 
         # ── Format 2: Aider SEARCH / REPLACE ─────────────────────────
-        # Only used if Format 1 didn't match; if both match, Format 1 wins
-        # for file_path / diff_or_body and the Aider blocks add to edits.
         if not result["file_path"]:
             block_pattern = re.compile(
                 r"^([a-zA-Z0-9_./-]+)\s*\n<<<< SEARCH\n(.*?)\n====\n(.*?)\n>>>> REPLACE",
@@ -223,7 +269,6 @@ def parse_m3_response(response_text: str) -> Optional[Dict[str, Any]]:
                     "replace": match.group(3),
                 }
                 result["edits"].append(block)
-                # First block becomes the unified file_path / diff_or_body.
                 if result["file_path"] is None:
                     result["file_path"] = block["file_path"]
                     result["diff_or_body"] = block["replace"]
@@ -241,9 +286,6 @@ def parse_m3_response(response_text: str) -> Optional[Dict[str, Any]]:
                 body = body[:-3].strip()
             result["test_body"] = body
 
-        # Strict mode: a usable response must have AT LEAST one edit AND
-        # complete test material. Missing pieces return None so the worker
-        # retries rather than acting on a partial parse.
         has_edit = bool(result["edits"])
         has_full_test = bool(result["test_path"]) and bool(result["test_body"])
         if not has_edit or not has_full_test:
@@ -286,21 +328,28 @@ async def run_implementation_pass(finding_id: str, session_name: str, report_con
             f"RESEARCH REPORT:\n{truncated_report}\n\n"
             f"TASK:\n"
             f"1. Choose ONE implementable improvement (feature, bugfix, refactor, or test).\n"
-            f"2. Emit the fix using ONLY the strict Aider SEARCH/REPLACE format below.\n"
+            f"2. Emit the fix using the PRIMARY diff format below (preferred) or the FALLBACK JSON format.\n"
             f"3. Emit a pytest regression using the TEST_FILE format below.\n\n"
             f"OUTPUT CONTRACT:\n"
-            f"- Output only edit blocks and the test file. No prose, markdown, or analysis.\n"
-            f"- Do NOT emit unified diffs, diff fences, git patches, hunk headers, or +/- line prefixes.\n"
+            f"- Output only the edit block and the test file. No prose or analysis.\n"
             f"- Do NOT use placeholder paths. Every path must be a real repository-relative path.\n"
-            f"- The SEARCH section must be copied verbatim from the current file and must match exactly once.\n"
-            f"- If you cannot produce an exact SEARCH block and a complete TEST_FILE, output exactly the word: CANNOT_PATCH\n\n"
-            f"EDIT FORMAT:\n"
-            f"path/to/existing_file.py\n"
-            f"<<<< SEARCH\n"
-            f"exact existing lines to find and replace\n"
-            f"====\n"
-            f"replacement lines\n"
-            f">>>> REPLACE\n\n"
+            f"- If you cannot produce a valid edit block and a complete TEST_FILE, output exactly: CANNOT_PATCH\n\n"
+            f"PRIMARY FORMAT — well-formed unified diff inside a ```diff fence:\n"
+            f"```diff\n"
+            f"--- a/path/to/existing_file.py\n"
+            f"+++ b/path/to/existing_file.py\n"
+            f"@@ -<old_start>,<old_count> +<new_start>,<new_count> @@\n"
+            f" context line (prefix with one space)\n"
+            f"-removed line (prefix with '-')\n"
+            f"+added line (prefix with '+')\n"
+            f" context line\n"
+            f"```\n\n"
+            f"CRITICAL diff rules:\n"
+            f"- MUST have '--- a/<path>' and '+++ b/<path>' headers on the first two lines.\n"
+            f"- EVERY hunk header MUST be '@@ -a,b +c,d @@' where b = number of ' ' and '-' body lines exactly, d = number of ' ' and '+' body lines exactly.\n"
+            f"- EVERY hunk body line MUST start with ' ' (context), '+' (add), or '-' (remove). NO bare lines.\n\n"
+            f"FALLBACK FORMAT — use ONLY when you cannot produce a valid unified diff:\n"
+            f'{{\"path\": \"v2/src/example.py\", \"find\": \"exact text to find\", \"replace\": \"replacement text\"}}\n\n'
             f"TEST_FILE: path/to/test_file.py\n"
             f"TEST_CONTENT:\n"
             f"<complete pytest test file body>\n"
@@ -371,12 +420,38 @@ async def run_implementation_pass(finding_id: str, session_name: str, report_con
         except Exception as e:
             return {"success": False, "error": f"Exception during pre-test: {e}"}
 
-        # 7. Apply Aider edits to worktree
+        # 7. Apply edits to worktree
         try:
+            from src.patch_validator import (
+                apply_unified_diff,
+                json_payload_to_diff,
+                DiffValidationError,
+            )
             for edit in parsed.get("edits", []):
                 file_path = Path(wtpath) / edit["file_path"]
                 file_path.parent.mkdir(parents=True, exist_ok=True)
-                
+
+                # Unified diff path (Format 0)
+                if edit.get("unified_diff"):
+                    ok, msg = apply_unified_diff(edit["unified_diff"], wtpath)
+                    if not ok:
+                        return {"success": False, "error": f"Unified diff apply failed: {msg}"}
+                    logger.info(f"Applied unified diff to {edit['file_path']}: {msg}")
+                    continue
+
+                # JSON payload fallback (Format 0b)
+                if edit.get("json_payload"):
+                    try:
+                        diff_text = json_payload_to_diff(edit["json_payload"], wtpath)
+                        ok, msg = apply_unified_diff(diff_text, wtpath)
+                        if not ok:
+                            return {"success": False, "error": f"JSON-payload diff apply failed: {msg}"}
+                        logger.info(f"Applied JSON-payload diff to {edit['file_path']}: {msg}")
+                    except (ValueError, FileNotFoundError) as exc:
+                        return {"success": False, "error": f"JSON payload reconstruct failed: {exc}"}
+                    continue
+
+                # Aider SEARCH/REPLACE path (Format 1 / 2)
                 if file_path.exists():
                     content = file_path.read_text()
                     if edit["search"] in content:
