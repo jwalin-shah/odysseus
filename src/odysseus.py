@@ -46,6 +46,7 @@ REGISTRY = {
     # bypass is safe here: coder runs only inside a disposable worktree with a
     # pytest gate; red = discarded
     "claude":        {"argv": ["claude", "-p", "--dangerously-skip-permissions", "{prompt}"], "kind": "coder"},
+    "claude-b":      {"argv": ["claude-b-p", "{prompt}"], "kind": "coder"},  # account-B fallback when pioneer/opencode down
     "opencode-opus": {"argv": ["opencode", "run", "-m", "pioneer/claude-opus-4-8", "{prompt}"], "kind": "coder"},
     # Short aliases: ca = claude opus (best), cb = claude sonnet (mid), cc = haiku (fast).
     # All three go through OpenCode+Pioneer so they share one API key and quota bucket.
@@ -577,13 +578,28 @@ def do_code(mission, args, docs):
                   f"edit files directly; the gate is: `{args.test}`):\n{mission}"
                   if docs or repomap else mission)
         rc, out, err, dur = run_tool(tool, prompt, wt, args.timeout)
+        dirty = subprocess.run(["git", "-C", wt, "status", "--porcelain"],
+                               capture_output=True, text=True)
+        if not dirty.stdout.strip():
+            passed = False
+            print(f"FAIL — empty output/no changes; discarded\n{out[-1000:]}{err[-500:]}")
+            return {"agent_used": tool, "result": "empty_output",
+                    "test_passed": False, "branch": None,
+                    "duration": round(dur, 1)}
+
         test = subprocess.run(args.test, shell=True, cwd=wt, env=_worktree_test_env(repo),
                               capture_output=True, text=True, timeout=600)
         passed = test.returncode == 0
         if passed:
             subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
-            subprocess.run(["git", "-C", wt, "commit", "-m", f"ody({tool}): {mission[:60]}"],
-                           capture_output=True)
+            commit = subprocess.run(["git", "-C", wt, "commit", "-m", f"ody({tool}): {mission[:60]}"],
+                                    capture_output=True, text=True)
+            if commit.returncode != 0:
+                passed = False
+                print(f"FAIL — commit failed; discarded\n{commit.stdout[-1000:]}{commit.stderr[-500:]}")
+                return {"agent_used": tool, "result": "commit_failed",
+                        "test_passed": False, "branch": None,
+                        "duration": round(dur, 1)}
             print(f"PASS — committed on branch {branch}\n{out[-1500:]}")
         else:
             print(f"FAIL — discarded\n{test.stdout[-1000:]}{test.stderr[-500:]}")
