@@ -58,6 +58,13 @@ LANES = {
 
 
 def load_rows(path: Path) -> list[dict]:
+    try:
+        import duckdb
+        return duckdb.sql(
+            f"SELECT * FROM read_json({str(path)!r}, auto_detect=true)"
+        ).df().to_dict("records")
+    except Exception:
+        pass
     rows = []
     with path.open() as fh:
         for line in fh:
