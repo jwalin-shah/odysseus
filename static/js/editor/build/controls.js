@@ -9,17 +9,36 @@
  * @param {{ color: string, brushSize: number, wandTolerance: number }} ctx
  * @returns {string}
  */
+
+// ODYSSEY-XSS: every template interpolation flows through escapeAttr() so
+// a malicious or malformed `color` / `wandTolerance` cannot break out of
+// the surrounding double-quoted attribute. OWASP XSS Prevention Cheat
+// Sheet §2.1.2 — escape `"`, `&`, `<`, `>`, and `/` for attribute contexts.
+function escapeAttr(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\//g, '&#x2F;');
+}
+
 export function controlsHTML({ color, brushSize, wandTolerance }) {
   const brushSliderValue = Math.round(Math.log(Math.max(1, brushSize)) / Math.log(800) * 1000);
+  const safeColor = escapeAttr(color);
+  const safeBrush = escapeAttr(brushSize);
+  const safeSlider = escapeAttr(brushSliderValue);
+  const safeTol = escapeAttr(wandTolerance);
   return `
     <div id="ge-brush-controls">
       <div class="ge-control-row" id="ge-color-row">
         <label>Color</label>
-        <input type="color" class="ge-color-picker" value="${color}" />
+        <input type="color" class="ge-color-picker" value="${safeColor}" />
       </div>
       <div class="ge-control-row">
-        <label>Size <span class="ge-size-label">${brushSize}px</span></label>
-      <input type="range" class="ge-size-slider" min="0" max="1000" value="${brushSliderValue}" />
+        <label>Size <span class="ge-size-label">${safeBrush}px</span></label>
+      <input type="range" class="ge-size-slider" min="0" max="1000" value="${safeSlider}" />
     </div>
     </div>
     <div class="ge-lasso-section" id="ge-lasso-section" style="display:none;">
@@ -61,9 +80,9 @@ export function controlsHTML({ color, brushSize, wandTolerance }) {
       </div>
       <div class="ge-control-row ge-eraser-row">
         <span class="ge-eraser-preview" id="ge-wand-tol-preview" aria-hidden="true"></span>
-        <label>Tolerance <span id="ge-wand-tol-label">${wandTolerance}</span></label>
+        <label>Tolerance <span id="ge-wand-tol-label">${safeTol}</span></label>
         <button type="button" class="ge-btn ge-btn-sm ge-wand-live-btn" id="ge-wand-live" title="Retune selection while dragging tolerance" aria-pressed="false">Live</button>
-        <input type="range" id="ge-wand-tolerance" min="0" max="100" value="${wandTolerance}" />
+        <input type="range" id="ge-wand-tolerance" min="0" max="100" value="${safeTol}" />
       </div>
       <div class="ge-control-row ge-eraser-row ge-sel-refine" id="ge-wand-refine-feather" style="display:none;">
         <span class="ge-eraser-preview" id="ge-wand-feather-preview" aria-hidden="true"></span>
@@ -127,8 +146,8 @@ export function controlsHTML({ color, brushSize, wandTolerance }) {
       </div>
       <div class="ge-control-row ge-eraser-row">
         <span class="ge-eraser-preview" id="ge-inpaint-brush-preview" aria-hidden="true"></span>
-        <label>Mask Brush Size <span id="ge-inpaint-brush-label">${brushSize}px</span></label>
-        <input type="range" id="ge-inpaint-brush-slider" min="0" max="1000" value="${brushSliderValue}" title="Brush diameter (log scale 1→800px). Use [ and ] for ±10%." />
+        <label>Mask Brush Size <span id="ge-inpaint-brush-label">${safeBrush}px</span></label>
+        <input type="range" id="ge-inpaint-brush-slider" min="0" max="1000" value="${safeSlider}" title="Brush diameter (log scale 1→800px). Use [ and ] for ±10%." />
       </div>
       <div class="ge-control-row ge-actions ge-inpaint-mask-row" style="margin-top:4px;">
         <button class="ge-btn ge-btn-sm ge-btn-iconlabel ge-mask-vis-btn visible" id="ge-mask-vis" title="Hide mask">

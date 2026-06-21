@@ -53,8 +53,22 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
         }
 
         filename = f"odysseus_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        # ODYSSEY-JSON: pass `default=str` so datetime/Decimal/UUID/pathlib.Path
+        # etc. serialize to a readable form rather than 500-ing. We do NOT
+        # silently swallow other TypeErrors — those are real bugs the caller
+        # should know about. Bump the json.dumps in `try` so a serialization
+        # regression still surfaces as 500 with a useful message.
+        try:
+            payload = json.dumps(
+                export_data, indent=2, ensure_ascii=False, default=str
+            )
+        except (TypeError, ValueError) as e:
+            logger.exception("backup export: serialization failure")
+            raise HTTPException(
+                500, f"Failed to serialize export data: {type(e).__name__}: {e}"
+            )
         return Response(
-            content=json.dumps(export_data, indent=2, ensure_ascii=False),
+            content=payload,
             media_type="application/json",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
