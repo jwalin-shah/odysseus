@@ -51,6 +51,7 @@ Kinds:
 
 Flags (spawn):
   --model <model>  Override auto-routing and use this model
+  --scope <scope>  Override default ODY_SCOPE (scout=read-only, ship=write=*)
 USAGE
 }
 
@@ -124,7 +125,7 @@ PY
 }
 
 make_standing_orders() {
-  local id="$1" kind="$2" repo="$3" task="$4" cwd="$5" model="$6" out="$7"
+  local id="$1" kind="$2" repo="$3" task="$4" cwd="$5" model="$6" scope="$7" out="$8"
   local ts; ts="$(now_utc)"
   cat > "$out" <<EOF
 # Standing Orders — $id
@@ -134,6 +135,7 @@ Kind: $kind
 Repo: $repo
 Workdir: $cwd
 Model route: $model
+ODY_SCOPE: $scope
 
 ## Mission
 
@@ -176,7 +178,7 @@ EOF
 }
 
 cmd_spawn() {
-  local kind="" repo="" task="" id="" cmd="" model_override=""
+  local kind="" repo="" task="" id="" cmd="" model_override="" scope_override="" ody_scope=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --kind) kind="$2"; shift 2 ;;
@@ -185,6 +187,7 @@ cmd_spawn() {
       --id) id="$2"; shift 2 ;;
       --cmd) cmd="$2"; shift 2 ;;
       --model) model_override="$2"; shift 2 ;;
+      --scope) scope_override="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown spawn flag: $1" ;;
     esac
@@ -192,6 +195,14 @@ cmd_spawn() {
   [[ "$kind" == "scout" || "$kind" == "ship" ]] || die "--kind must be scout or ship"
   [[ -n "$repo" ]] || die "--repo required"
   [[ -n "$task" ]] || die "--task required"
+
+  if [[ -n "$scope_override" ]]; then
+    ody_scope="$scope_override"
+  elif [[ "$kind" == "scout" ]]; then
+    ody_scope="read-only"
+  else
+    ody_scope="write=*"
+  fi
 
   local repo_abs slug suffix rid dir status session model orders workdir model_source
   repo_abs="$(resolve_repo "$repo")"
@@ -256,7 +267,7 @@ PY
   fi
 
   orders="$dir/standing-orders.md"
-  make_standing_orders "$rid" "$kind" "$repo_abs" "$task" "$workdir" "$model" "$orders"
+  make_standing_orders "$rid" "$kind" "$repo_abs" "$task" "$workdir" "$model" "$ody_scope" "$orders"
 
   session="ody-$rid"
   if "$TMUX" has-session -t "$session" 2>/dev/null; then
@@ -272,11 +283,13 @@ SESSION='$session'
 TASK='$(printf '%s' "$task" | sed "s/'/'\\''/g")'
 MODEL='$model'
 MODEL_SOURCE='$model_source'
+ODY_SCOPE='$ody_scope'
 ORDERS='$orders'
 CREATED_AT='$(now_utc)'
 EOF
 
-  record_event "spawn" "$rid" "kind=$kind repo=$repo_abs model=$model source=$model_source"
+  write_status "$rid" "preflight" "scope=$ody_scope"
+  record_event "spawn" "$rid" "kind=$kind repo=$repo_abs model=$model source=$model_source scope=$ody_scope"
   write_status "$rid" "spawn" "session=$session"
 
   "$TMUX" new-session -d -s "$session" -c "$workdir" -x 220 -y 50
@@ -295,9 +308,9 @@ EOF
 
   local launch
   if [[ -n "$cmd" ]]; then
-    launch="clear; cat '$orders'; echo; echo '---'; $cmd"
+    launch="export ODY_SCOPE='$ody_scope'; clear; cat '$orders'; echo; echo '---'; $cmd"
   else
-    launch="clear; cat '$orders'; echo; echo '---'; echo 'Run your agent command here, then update: $status'"
+    launch="export ODY_SCOPE='$ody_scope'; clear; cat '$orders'; echo; echo '---'; echo 'Run your agent command here, then update: $status'"
   fi
   "$TMUX" send-keys -t "$session" "$launch" Enter
 
@@ -314,6 +327,7 @@ EOF
   echo "  repo:    $repo_abs"
   echo "  workdir: $workdir"
   echo "  model:   $model ($model_source)"
+  echo "  scope:   $ody_scope"
   echo "  tmux:    $session"
   echo "  orders:  $orders"
   echo "  attach:  tmux attach -t $session"
@@ -371,6 +385,7 @@ repo: $REPO
 workdir: $WORKDIR
 session: $SESSION
 model: $MODEL
+scope: ${ODY_SCOPE:-unknown}
 last_status: $last
 orders: $ORDERS
 

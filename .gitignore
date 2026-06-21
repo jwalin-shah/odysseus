@@ -103,7 +103,3 @@ compound.config.json
 _scratch/
 /odysseus/
 training-examples.jsonl
-
-# Go build artifacts
-go-src/**/aiint
-go-src/*/cmd/*/*
