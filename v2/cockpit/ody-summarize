@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""ody-summarize: hypernym compression of cockpit events into compact summaries.
+
+Reads ~/.odysseus/cockpit/events.jsonl and groups raw events into semantic
+phases: source_recon, validation, ship_gate, decision, tool_call, result.
+Outputs compact AXI-style summary to stdout and pushes to memjuice.
+
+Usage:
+  ody-summarize                          # summarize the last 24h of events
+  ody-summarize --since 2h               # last 2 hours
+  ody-summarize --run <id>               # specific run
+  ody-summarize --format markdown        # verbose markdown instead of compact
+  ody-summarize --watch                  # one-shot: summarize, then watch
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+
+STATE_ROOT = os.environ.get("ODY_CREW_STATE", os.path.expanduser("~/.odysseus/cockpit"))
+EVENTS_FILE = os.path.join(STATE_ROOT, "events.jsonl")
+STATUS_DIR = os.path.join(STATE_ROOT, "status")
+RUNS_DIR = os.path.join(STATE_ROOT, "runs")
+
+# ── hypernym mapping ──────────────────────────────────────────────────────
+# Maps raw event/message patterns to semantic phases.
+HYPERNYM_RULES = [
+    (re.compile(r"\bpreflight\b", re.I), "stage_preflight"),
+    (re.compile(r"\bspawn\b", re.I), "stage_spawn"),
+    (re.compile(r"\bworktree\b", re.I), "stage_worktree"),
+    (re.compile(r"\brunning|launched\b", re.I), "stage_execution"),
+    (re.compile(r"\bgithits|source|recon|search|grep|read\b", re.I), "source_recon"),
+    (re.compile(r"\bgrep|rg|find|llm-tldr|rtk|githits\b", re.I), "source_recon"),
+    (re.compile(r"\bcheck\.sh|test|lint|validate|gate|check_tooling\b", re.I), "validation"),
+    (re.compile(r"\bno-mistakes|no_mistakes|ship|push|pr\b", re.I), "ship_gate"),
+    (re.compile(r"\bmodel|route|quota|sys_router\b", re.I), "routing"),
+    (re.compile(r"\btreehouse|worktree|work_dir\b", re.I), "infrastructure"),
+    (re.compile(r"\bpeek|send|watch|status\b", re.I), "supervision"),
+    (re.compile(r"\bteardown|done|complete|kill\b", re.I), "teardown"),
+    (re.compile(r"\bfailed|error|fail|abort\b", re.I), "failure"),
+    (re.compile(r"\bblocked|stale|timeout\b", re.I), "blocked"),
+    (re.compile(r"\bcommit|decide|accept|reject\b", re.I), "decision"),
+]
+
+
+def classify_event(event: dict) -> str:
+    """Classify a raw event into a hypernym phase label."""
+    msg = event.get("msg", "")
+    kind = event.get("kind", "")
+    id_ = event.get("id", "")
+
+    # Direct kind mappings
+    if kind == "spawn":
+        return "stage_spawn"
+    if kind == "teardown":
+        return "teardown"
+    if kind == "ship":
+        return "ship_gate"
+
+    # Pattern match
+    for pattern, label in HYPERNYM_RULES:
+        if pattern.search(str(msg)) or pattern.search(str(id_)):
+            return label
+
+    return "other"
+
+
+def load_events(since: datetime | None = None, run_id: str | None = None) -> list[dict]:
+    """Load events from file, optionally filtered."""
+    events = []
+    if not os.path.exists(EVENTS_FILE):
+        return events
+
+    with open(EVENTS_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since:
+                try:
+                    ts = datetime.fromisoformat(ev["ts"])
+                    if ts < since:
+                        continue
+                except (KeyError, ValueError):
+                    continue
+            if run_id and ev.get("id") != run_id:
+                continue
+            events.append(ev)
+
+    return events
+
+
+def load_run_status(run_id: str) -> list[tuple]:
+    """Load status lines for a run id."""
+    sp = os.path.join(STATUS_DIR, f"{run_id}.status")
+    lines = []
+    if not os.path.exists(sp):
+        return lines
+    with open(sp) as f:
+        for line in f:
+            parts = line.strip().split("\t", 2)
+            if len(parts) >= 2:
+                lines.append(parts)
+    return lines
+
+
+def load_run_meta(run_id: str) -> dict:
+    """Load meta.env for a run id."""
+    mp = os.path.join(RUNS_DIR, run_id, "meta.env")
+    meta = {}
+    if not os.path.exists(mp):
+        return meta
+    with open(mp) as f:
+        for line in f:
+            line = line.strip()
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            v = v.strip("'\"")
+            meta[k] = v
+    return meta
+
+
+def compress_events(events: list[dict]) -> dict:
+    """Group events by hypernym phase and produce compact summary."""
+    phases = defaultdict(list)
+    tool_calls = defaultdict(int)
+    decisions = []
+    failures = []
+
+    for ev in events:
+        phase = classify_event(ev)
+        phases[phase].append(ev)
+
+        # Track tool calls from msg content
+        msg = ev.get("msg", "")
+        for tool in ["githits", "gh", "ody-pane", "ody-crew", "no-mistakes",
+                      "treehouse", "llm-tldr", "rtk", "web", "chrome"]:
+            if tool in msg.lower():
+                tool_calls[tool] += 1
+
+        # Capture decisions and failures
+        if phase == "decision":
+            decisions.append(msg)
+        if phase == "failure":
+            failures.append(msg)
+        if phase == "blocked":
+            failures.append(f"[BLOCKED] {msg}")
+
+    if not events:
+        return {"status": "no_events", "phases": {}, "tool_calls": {}}
+
+    first_ts = events[0].get("ts", "")
+    last_ts = events[-1].get("ts", "")
+
+    # Build phase counts and descriptions
+    phase_summary = {}
+    for phase, evlist in sorted(phases.items()):
+        phase_summary[phase] = {
+            "count": len(evlist),
+            "first": evlist[0].get("ts", ""),
+            "last": evlist[-1].get("ts", ""),
+            "entries": [
+                ev.get("msg", "")[:80] for ev in evlist[-3:]
+            ],
+        }
+
+    return {
+        "window": {"first": first_ts, "last": last_ts},
+        "phases": phase_summary,
+        "tool_calls": dict(tool_calls),
+        "decisions": decisions[-5:],
+        "failures": failures[-3:],
+        "event_count": len(events),
+    }
+
+
+def format_compact(summary: dict) -> str:
+    """AXI-style compact output."""
+    out = []
+    out.append(f"window: {summary['window']['first'][:19]} → {summary['window']['last'][:19]}")
+    out.append(f"events: {summary['event_count']}")
+
+    if summary["phases"]:
+        ordered = ["stage_preflight", "stage_spawn", "stage_worktree", "source_recon",
+                   "validation", "ship_gate", "routing", "supervision", "execution",
+                   "decision", "failure", "blocked", "teardown"]
+        seen_phases = [p for p in ordered if p in summary["phases"]]
+        out.append("phases:")
+        for p in seen_phases:
+            info = summary["phases"][p]
+            out.append(f"  {p}: {info['count']} events")
+            if info["entries"]:
+                for e in info["entries"][-1:]:
+                    out.append(f"    └ {e}")
+
+        # Show any phases not in ordered ordering
+        extra = [p for p in summary["phases"] if p not in ordered]
+        for p in extra:
+            info = summary["phases"][p]
+            out.append(f"  {p}: {info['count']} events")
+            if info["entries"]:
+                out.append(f"    └ {info['entries'][-1]}")
+
+    if summary["tool_calls"]:
+        out.append("tools:")
+        for tool, count in sorted(summary["tool_calls"].items()):
+            out.append(f"  {tool}: {count}")
+
+    if summary["failures"]:
+        out.append("failures:")
+        for f_ in summary["failures"]:
+            out.append(f"  ⚠ {f_}")
+
+    if summary["decisions"]:
+        out.append("decisions:")
+        for d in summary["decisions"]:
+            out.append(f"  → {d}")
+
+    return "\n".join(out)
+
+
+def format_markdown(summary: dict) -> str:
+    """Verbose markdown summary."""
+    out = []
+    out.append(f"# cockpit summary\n")
+    out.append(f"window: `{summary['window']['first'][:19]}` → `{summary['window']['last'][:19]}`")
+    out.append(f"total events: {summary['event_count']}")
+    out.append("")
+
+    if summary["phases"]:
+        out.append("## phases\n")
+        for phase_label, info in sorted(summary["phases"].items()):
+            label = phase_label.replace("stage_", "").replace("_", " ").title()
+            out.append(f"### {label} ({info['count']})")
+            for e in info["entries"]:
+                out.append(f"- {e}")
+            out.append("")
+
+    if summary["tool_calls"]:
+        out.append("## tools\n")
+        for tool, count in sorted(summary["tool_calls"].items()):
+            out.append(f"- **{tool}**: {count}")
+        out.append("")
+
+    if summary["failures"]:
+        out.append("## failures\n")
+        for f_ in summary["failures"]:
+            out.append(f"- ⚠ {f_}")
+        out.append("")
+
+    if summary["decisions"]:
+        out.append("## decisions\n")
+        for d in summary["decisions"]:
+            out.append(f"- {d}")
+        out.append("")
+
+    return "\n".join(out)
+
+
+def push_memjuice(summary: dict):
+    """Push structured summary to memjuice."""
+    if not shutil_available("memjuice"):
+        return
+    import subprocess
+    payload = json.dumps(summary, default=str)
+    try:
+        subprocess.run(
+            ["memjuice", "observe", "--project", "odysseus", "--kind", "cockpit-summary", payload],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def shutil_available(name: str) -> bool:
+    """Check if executable is in PATH."""
+    import shutil
+    return shutil.which(name) is not None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ody-summarize: hypernym cockpit events compressor")
+    parser.add_argument("--since", default="24h", help="Time window: 1h, 2h, 24h, 7d (default 24h)")
+    parser.add_argument("--run", help="Specific run ID to summarize")
+    parser.add_argument("--format", choices=["compact", "markdown"], default="compact")
+    parser.add_argument("--watch", action="store_true", help="One-shot: summarize and watch")
+    args = parser.parse_args()
+
+    # Parse since
+    since = None
+    if args.since and not args.run:
+        m = re.match(r"(\d+)([hd])", args.since)
+        if m:
+            n = int(m.group(1))
+            unit = m.group(2)
+            delta = timedelta(hours=n) if unit == "h" else timedelta(days=n)
+            since = datetime.now(timezone.utc) - delta
+
+    events = load_events(since=since, run_id=args.run)
+
+    if not events:
+        print(f"ody-summarize: no events found (since={args.since}, run={args.run})")
+        return
+
+    summary = compress_events(events)
+
+    if args.format == "markdown":
+        output = format_markdown(summary)
+    else:
+        output = format_compact(summary)
+
+    print(output)
+
+    # Push to memjuice if available
+    push_memjuice(summary)
+
+    # If watch, also run dry watch
+    if args.watch:
+        watch_extra = load_events(since=since, run_id=args.run)
+        if watch_extra and len(watch_extra) > len(events):
+            print("\n--- (new events detected during run) ---")
+            for ev in watch_extra[len(events):]:
+                print(f"  {ev.get('ts','')[:19]}  {ev.get('kind','')}  {ev.get('msg','')}")
+
+
+if __name__ == "__main__":
+    main()
