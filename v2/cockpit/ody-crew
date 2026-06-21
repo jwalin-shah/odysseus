@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# ody-crew — firstmate-style coordinator for Odysseus cockpit.
+#
+# Uses:
+#   - treehouse for reusable git worktrees when available
+#   - tmux for visible worker sessions
+#   - ody-pane for pane inspection / status
+#   - no-mistakes for ship-mode validation
+#   - memjuice for durable evidence when available
+#
+# Commands:
+#   ody-crew spawn --kind scout|ship --repo <path> --task "..." [--id <id>] [--cmd <cmd>]
+#   ody-crew status
+#   ody-crew watch
+#   ody-crew peek <id> [lines]
+#   ody-crew send <id> <text...>
+#   ody-crew summarize <id>
+#   ody-crew ship <id>
+#   ody-crew teardown <id>
+
+set -euo pipefail
+
+COCKPIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_ROOT="${ODY_CREW_STATE:-$HOME/.odysseus/cockpit}"
+RUNS_DIR="$STATE_ROOT/runs"
+STATUS_DIR="$STATE_ROOT/status"
+EVENTS_FILE="$STATE_ROOT/events.jsonl"
+mkdir -p "$RUNS_DIR" "$STATUS_DIR"
+
+ODYPANE="${ODYPANE:-ody-pane}"
+TREEHOUSE="${TREEHOUSE:-treehouse}"
+TMUX="${TMUX:-tmux}"
+
+usage() {
+  cat <<'USAGE'
+ody-crew: Odysseus firstmate-style coordinator
+
+Commands:
+  spawn --kind scout|ship --repo <path> --task "..." [--id <id>] [--cmd <cmd>] [--model <model>]
+  status
+  watch
+  peek <id> [lines]
+  send <id> <text...>
+  summarize <id>
+  ship <id>
+  teardown <id>
+
+Kinds:
+  scout  report-only; no no-mistakes push
+  ship   code-changing task; use no-mistakes before upstream push
+
+Flags (spawn):
+  --model <model>  Override auto-routing and use this model
+  --scope <scope>  Override default ODY_SCOPE (scout=read-only, ship=write=*)
+USAGE
+}
+
+die() { echo "ody-crew: $*" >&2; exit 1; }
+
+slugify() {
+  python3 - "$1" <<'PY'
+import re, sys
+s=sys.argv[1].lower()
+s=re.sub(r'[^a-z0-9]+','-',s).strip('-')
+print((s or 'task')[:32])
+PY
+}
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
+}
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+record_event() {
+  local kind="$1" id="$2" msg="$3"
+  local ts; ts="$(now_utc)"
+  python3 - "$EVENTS_FILE" "$ts" "$kind" "$id" "$msg" <<'PY'
+import json, sys
+path, ts, kind, rid, msg = sys.argv[1:]
+with open(path, 'a') as f:
+    f.write(json.dumps({"ts": ts, "kind": kind, "id": rid, "msg": msg}, sort_keys=True) + "\n")
+PY
+  if command -v memjuice >/dev/null 2>&1; then
+    memjuice observe --project odysseus --kind cockpit "$kind $id: $msg" >/dev/null 2>&1 || true
+  fi
+}
+
+write_status() {
+  local id="$1" status="$2" note="$3"
+  local ts; ts="$(now_utc)"
+  printf '%s\t%s\t%s\n' "$ts" "$status" "$note" >> "$STATUS_DIR/$id.status"
+}
+
+meta_path() { echo "$RUNS_DIR/$1/meta.env"; }
+run_dir() { echo "$RUNS_DIR/$1"; }
+
+load_meta() {
+  local id="$1" mp
+  mp="$(meta_path "$id")"
+  [[ -f "$mp" ]] || die "unknown run id: $id"
+  # shellcheck disable=SC1090
+  source "$mp"
+}
+
+resolve_repo() {
+  local repo="$1"
+  if [[ -d "$repo" ]]; then (cd "$repo" && pwd); return; fi
+  if [[ -d "$HOME/projects/$repo" ]]; then (cd "$HOME/projects/$repo" && pwd); return; fi
+  die "repo not found: $repo"
+}
+
+pick_model() {
+  if [[ -f "$HOME/projects/odysseus/v2/src/sys_router.py" ]]; then
+    python3 - <<'PY' 2>/dev/null || { echo codex; exit 0; }
+import sys
+sys.path.insert(0, "/Users/jwalinshah/projects/odysseus/v2/src")
+import sys_router
+model = sys_router.get_best_model()
+print(model or "codex")
+PY
+  else
+    echo codex
+  fi
+}
+
+make_standing_orders() {
+  local id="$1" kind="$2" repo="$3" task="$4" cwd="$5" model="$6" scope="$7" out="$8"
+  local ts; ts="$(now_utc)"
+  cat > "$out" <<EOF
+# Standing Orders — $id
+
+Started: $ts
+Kind: $kind
+Repo: $repo
+Workdir: $cwd
+Model route: $model
+ODY_SCOPE: $scope
+
+## Mission
+
+$task
+
+## Rules
+
+- Keep changes scoped to the mission.
+- Use compact tools first: llm-tldr, rtk, githits-axi, ody-pane.
+- If kind=scout: write findings/report only. Do not push.
+- If kind=ship: validate locally and ship through no-mistakes.
+- Before code changes: inspect git status and relevant tests.
+- On timeout or confusion: stop and report, do not widen scope.
+- Never print secrets.
+
+## Orchestrator invariants
+
+- P1: write scope must be enforced by task kind.
+- P3: model/quota/tool preflight happens before dispatch.
+- P5: run id is unique and status is durable before effects.
+- AX-028: write-before-dying — update status before major effects.
+- AX-029: long tasks must emit progress/status.
+
+## Available lazy tools
+
+- ody-pane list|peek|status|watch
+- treehouse get|return|status
+- no-mistakes for ship gates
+- githits-axi for source reconnaissance
+- gh for PR/issues/checks
+- memjuice for durable observation recall
+
+## Completion contract
+
+Write one of these to status/report:
+- done: <summary + validation>
+- blocked: <exact blocker>
+- failed: <command + output summary>
+EOF
+}
+
+cmd_spawn() {
+  local kind="" repo="" task="" id="" cmd="" model_override="" scope_override="" ody_scope=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind) kind="$2"; shift 2 ;;
+      --repo) repo="$2"; shift 2 ;;
+      --task) task="$2"; shift 2 ;;
+      --id) id="$2"; shift 2 ;;
+      --cmd) cmd="$2"; shift 2 ;;
+      --model) model_override="$2"; shift 2 ;;
+      --scope) scope_override="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown spawn flag: $1" ;;
+    esac
+  done
+  [[ "$kind" == "scout" || "$kind" == "ship" ]] || die "--kind must be scout or ship"
+  [[ -n "$repo" ]] || die "--repo required"
+  [[ -n "$task" ]] || die "--task required"
+
+  if [[ -n "$scope_override" ]]; then
+    ody_scope="$scope_override"
+  elif [[ "$kind" == "scout" ]]; then
+    ody_scope="read-only"
+  else
+    ody_scope="write=*"
+  fi
+
+  local repo_abs slug suffix rid dir status session model orders workdir model_source
+  repo_abs="$(resolve_repo "$repo")"
+  slug="$(slugify "$task")"
+  suffix="$(python3 - <<'PY'
+import secrets,string
+print(''.join(secrets.choice(string.ascii_lowercase+string.digits) for _ in range(4)))
+PY
+)"
+  rid="${id:-${kind}-${slug}-${suffix}}"
+  dir="$(run_dir "$rid")"
+  [[ ! -e "$dir" ]] || die "run id already exists: $rid"
+
+  # ── P5: run-id prefix dedup ────────────────────────────────────────────────
+  # Warn if any existing run id is a prefix of the new id (or vice-versa), to
+  # catch accidental re-dispatch of the same logical workpack.
+  for existing_dir in "$RUNS_DIR"/*/; do
+    [[ -d "$existing_dir" ]] || continue
+    local existing_id
+    existing_id="$(basename "$existing_dir")"
+    if [[ "$rid" == "${existing_id}"* || "$existing_id" == "${rid}"* ]]; then
+      echo "ody-crew: warning: new id '$rid' shares prefix with existing run '$existing_id' — possible duplicate dispatch" >&2
+    fi
+  done
+
+  mkdir -p "$dir"
+  status="$STATUS_DIR/$rid.status"
+  : > "$status"
+  write_status "$rid" "preflight" "repo=$repo_abs kind=$kind"
+
+  # ── P3: model selection ────────────────────────────────────────────────────
+  if [[ -n "$model_override" ]]; then
+    model="$model_override"
+    model_source="override"
+  else
+    model="$(pick_model "$task")"
+    model_source="auto"
+  fi
+  write_status "$rid" "preflight" "model=$model source=$model_source"
+
+  # ── P3: quota preflight ────────────────────────────────────────────────────
+  if command -v ody-policy >/dev/null 2>&1; then
+    local quota_result quota_exit
+    quota_result="$(ody-policy check "$model" 2>&1)" || quota_exit=$?
+    quota_exit="${quota_exit:-0}"
+    if [[ "$quota_exit" -eq 75 ]]; then
+      write_status "$rid" "rejected" "quota exhausted for $model"
+      record_event "rejected" "$rid" "quota exhausted for $model"
+      rmdir "$dir" 2>/dev/null || true
+      echo "quota exhausted for $model" >&2
+      exit 75
+    fi
+    write_status "$rid" "preflight" "quota=$quota_result"
+  fi
+
+  # Acquire worktree. For now treehouse opens an interactive subshell, so spawn
+  # the worker in repo_abs and record that treehouse is available. ody-crew will
+  # use treehouse directly once noninteractive acquire path is confirmed.
+  workdir="$repo_abs"
+  if command -v "$TREEHOUSE" >/dev/null 2>&1; then
+    "$TREEHOUSE" status > "$dir/treehouse-status.txt" 2>&1 || true
+  fi
+
+  orders="$dir/standing-orders.md"
+  make_standing_orders "$rid" "$kind" "$repo_abs" "$task" "$workdir" "$model" "$ody_scope" "$orders"
+
+  session="ody-$rid"
+  if "$TMUX" has-session -t "$session" 2>/dev/null; then
+    die "tmux session already exists: $session"
+  fi
+
+  cat > "$(meta_path "$rid")" <<EOF
+ID='$rid'
+KIND='$kind'
+REPO='$repo_abs'
+WORKDIR='$workdir'
+SESSION='$session'
+TASK='$(printf '%s' "$task" | sed "s/'/'\\''/g")'
+MODEL='$model'
+MODEL_SOURCE='$model_source'
+ODY_SCOPE='$ody_scope'
+ORDERS='$orders'
+CREATED_AT='$(now_utc)'
+EOF
+
+  write_status "$rid" "preflight" "scope=$ody_scope"
+  record_event "spawn" "$rid" "kind=$kind repo=$repo_abs model=$model source=$model_source scope=$ody_scope"
+  write_status "$rid" "spawn" "session=$session"
+
+  "$TMUX" new-session -d -s "$session" -c "$workdir" -x 220 -y 50
+  "$TMUX" set-option -t "$session" -g status-left " [#S] " >/dev/null
+  "$TMUX" set-option -t "$session" -g status-right " ody-crew #{?window_active,active,idle} " >/dev/null
+
+  # Prefer treehouse for reusable isolated worktrees. It opens a subshell in
+  # the acquired workspace; after a short settle delay, send the standing
+  # orders/worker command into that subshell. If treehouse fails, remain in the
+  # repo checkout and still launch the worker visibly.
+  if command -v "$TREEHOUSE" >/dev/null 2>&1 && (cd "$workdir" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    "$TMUX" send-keys -t "$session" "treehouse get" Enter
+    sleep 1
+    write_status "$rid" "worktree" "treehouse get sent"
+  fi
+
+  local launch
+  if [[ -n "$cmd" ]]; then
+    launch="export ODY_SCOPE='$ody_scope'; clear; cat '$orders'; echo; echo '---'; $cmd"
+  else
+    launch="export ODY_SCOPE='$ody_scope'; clear; cat '$orders'; echo; echo '---'; echo 'Run your agent command here, then update: $status'"
+  fi
+  "$TMUX" send-keys -t "$session" "$launch" Enter
+
+  write_status "$rid" "running" "launched"
+
+  # ── P3: record routing decision after successful spawn ─────────────────────
+  if command -v ody-policy >/dev/null 2>&1; then
+    ody-policy record "$rid" >/dev/null 2>&1 || true
+    write_status "$rid" "preflight" "policy-recorded"
+  fi
+
+  echo "$rid"
+  echo "  kind:    $kind"
+  echo "  repo:    $repo_abs"
+  echo "  workdir: $workdir"
+  echo "  model:   $model ($model_source)"
+  echo "  scope:   $ody_scope"
+  echo "  tmux:    $session"
+  echo "  orders:  $orders"
+  echo "  attach:  tmux attach -t $session"
+}
+
+cmd_status() {
+  local id
+  printf 'runs:\n'
+  for mp in "$RUNS_DIR"/*/meta.env; do
+    [[ -f "$mp" ]] || continue
+    # shellcheck disable=SC1090
+    source "$mp"
+    local last live="dead"
+    last="$(tail -1 "$STATUS_DIR/$ID.status" 2>/dev/null || true)"
+    if "$TMUX" has-session -t "$SESSION" 2>/dev/null; then live="live"; fi
+    printf '  %s\t%s\t%s\t%s\t%s\n' "$ID" "$KIND" "$live" "$MODEL" "$last"
+  done
+}
+
+cmd_watch() {
+  if command -v "$ODYPANE" >/dev/null 2>&1; then
+    "$ODYPANE" watch --queue "$STATE_ROOT/.wake-queue" || true
+    "$ODYPANE" events-drain --queue "$STATE_ROOT/.wake-queue" || true
+  else
+    cmd_status
+  fi
+}
+
+cmd_peek() {
+  local id="$1" lines="${2:-40}"
+  load_meta "$id"
+  "$TMUX" capture-pane -p -t "$SESSION" -J -S -"$lines" 2>/dev/null || die "failed to capture $SESSION"
+}
+
+cmd_send() {
+  local id="$1"; shift
+  [[ $# -gt 0 ]] || die "send requires text"
+  load_meta "$id"
+  "$TMUX" send-keys -t "$SESSION" -l "$*"
+  case "$*" in /*) sleep 1.2 ;; *) sleep 0.3 ;; esac
+  "$TMUX" send-keys -t "$SESSION" Enter
+}
+
+cmd_summarize() {
+  local id="$1" dir status last
+  load_meta "$id"
+  dir="$(run_dir "$id")"
+  status="$STATUS_DIR/$id.status"
+  last="$(tail -1 "$status" 2>/dev/null || true)"
+  cat <<EOF
+# ody-crew summary — $id
+
+kind: $KIND
+repo: $REPO
+workdir: $WORKDIR
+session: $SESSION
+model: $MODEL
+scope: ${ODY_SCOPE:-unknown}
+last_status: $last
+orders: $ORDERS
+
+## phases
+
+- preflight: repo/model/status written
+- spawn: tmux session created
+- monitor: use ody-crew watch / peek
+- ship: $( [[ "$KIND" == "ship" ]] && echo "requires no-mistakes" || echo "not applicable for scout" )
+
+## recent status
+
+$(tail -20 "$status" 2>/dev/null || true)
+EOF
+}
+
+cmd_ship() {
+  local id="$1"
+  load_meta "$id"
+  [[ "$KIND" == "ship" ]] || die "run is not kind=ship: $id"
+  command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes not installed"
+  write_status "$id" "ship" "starting no-mistakes"
+  record_event "ship" "$id" "starting no-mistakes"
+  (cd "$WORKDIR" && no-mistakes init >/dev/null 2>&1 || true)
+  (cd "$WORKDIR" && git push no-mistakes "$(git branch --show-current)")
+  write_status "$id" "ship" "no-mistakes pipeline started"
+}
+
+cmd_teardown() {
+  local id="$1"
+  load_meta "$id"
+  write_status "$id" "teardown" "requested"
+  if "$TMUX" has-session -t "$SESSION" 2>/dev/null; then
+    "$TMUX" kill-session -t "$SESSION"
+  fi
+  record_event "teardown" "$id" "session killed"
+
+  # ── ship-without-no-mistakes warning ──────────────────────────────────────
+  # If this was a ship task, check that no-mistakes was actually invoked
+  # (evidenced by a "ship" status line) before teardown.
+  if [[ "$KIND" == "ship" ]]; then
+    if ! grep -q $'\tship\t' "$STATUS_DIR/$id.status" 2>/dev/null; then
+      echo "ody-crew: warning: ship task was not shipped through no-mistakes" >&2
+      record_event "teardown-warn" "$id" "ship task torn down without no-mistakes"
+    fi
+  fi
+
+  write_status "$id" "done" "teardown complete"
+}
+
+main() {
+  local sub="${1:-}"
+  [[ -n "$sub" ]] || { usage; exit 0; }
+  shift || true
+  case "$sub" in
+    spawn) cmd_spawn "$@" ;;
+    status) cmd_status "$@" ;;
+    watch) cmd_watch "$@" ;;
+    peek) [[ $# -ge 1 ]] || die "peek requires id"; cmd_peek "$@" ;;
+    send) [[ $# -ge 2 ]] || die "send requires id and text"; cmd_send "$@" ;;
+    summarize) [[ $# -eq 1 ]] || die "summarize requires id"; cmd_summarize "$1" ;;
+    ship) [[ $# -eq 1 ]] || die "ship requires id"; cmd_ship "$1" ;;
+    teardown) [[ $# -eq 1 ]] || die "teardown requires id"; cmd_teardown "$1" ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command: $sub" ;;
+  esac
+}
+
+main "$@"

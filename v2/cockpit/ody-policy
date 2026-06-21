@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# ody-policy — policy router / SLM training data recorder for cockpit.
+#
+# Two modes:
+#   1. cmd: one-shot intent classification, prints routing decision.
+#   2. record: records a decision trace to $STATE_ROOT/policy/traces.jsonl
+#      for later SLM training.
+#
+# Usage:
+#   ody-policy classify <intent_text>         # print routing decision
+#   ody-policy record <run_id>                # record a full run decision
+#   ody-policy check <model> --quota <dim>    # check quota for a model
+#   ody-policy help
+#
+# Architectural note: this is the prototype for the SLM router layer.
+# When enough traces are collected (target: 500+), this script's heuristics
+# become training labels for a compact model that sits between user intent
+# and tool dispatch.
+
+set -euo pipefail
+
+STATE_ROOT="${ODY_CREW_STATE:-$HOME/.odysseus/cockpit}"
+TRACES_DIR="$STATE_ROOT/policy"
+mkdir -p "$TRACES_DIR"
+
+usage() {
+  cat <<'USAGE'
+ody-policy — cockpit intent router / SLM training data recorder.
+
+Commands:
+  classify <intent>       Classify intent and print routing (scout|ship|direct|blocked)
+  record <run_id>          Record a full-run decision trace to policy/traces.jsonl
+  check <model> --quota <dim>  Check quota via sys_quota.py
+  help                     This help
+USAGE
+}
+
+die() { echo "ody-policy: $*" >&2; exit 1; }
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# ── heuristic classifiers ──────────────────────────────────────────────────
+
+classify() {
+  local intent="$1"
+  local intent_lower
+  intent_lower="$(printf '%s' "$intent" | tr '[:upper:]' '[:lower:]')"
+
+  # Direct answer patterns (no work needed)
+  if printf '%s' "$intent_lower" | grep -qiE '^(what|who|when|where|why|how many|how much|is there|does .* exist)'; then
+    if printf '%s' "$intent_lower" | grep -qiE '^(what|who|when|where|why) (is|are|was|were|do|does|did)'; then
+      echo "direct"
+      return
+    fi
+  fi
+
+  # Scout patterns (no code changes)
+  if printf '%s' "$intent_lower" | grep -qiE '\b(investigate|research|find|search|look at|examine|audit|analyze|check|list|show|describe|report|inspect|explore|survey|map|diagram|scout)\b'; then
+    echo "scout"
+    return
+  fi
+
+  # Ship patterns (code changes, PR, push)
+  if printf '%s' "$intent_lower" | grep -qiE '\b(fix|implement|add|change|update|refactor|rewrite|migrate|build|create|ship|deploy|patch|merge|push|pr)\b'; then
+    # Check if fix or non-code
+    if printf '%s' "$intent_lower" | grep -qiE '\b(merge|pr|review|ship|deploy|release)\b'; then
+      echo "ship"
+      return
+    fi
+    echo "ship"
+    return
+  fi
+
+  # Blocked patterns (missing info)
+  if printf '%s' "$intent_lower" | grep -qiE '\b(can.t|unable|blocked|stuck|help|how do)\b'; then
+    echo "blocked"
+    return
+  fi
+
+  # Default: scout is safe
+  echo "scout"
+}
+
+# ── trace recording ────────────────────────────────────────────────────────
+record_trace() {
+  local run_id="$1" ts model kind intent decision
+  ts="$(now_utc)"
+  RUN_DIR="$STATE_ROOT/runs/$run_id"
+
+  [[ -d "$RUN_DIR" ]] || die "unknown run: $run_id"
+
+  # Read meta.env
+  if [[ -f "$RUN_DIR/meta.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$RUN_DIR/meta.env"
+    model="${MODEL:-}"
+    kind="${KIND:-}"
+  fi
+
+  # Read standing orders for intent. The mission text starts after the
+  # "## Mission" heading with a blank separator line, so skip blank lines.
+  if [[ -f "$RUN_DIR/standing-orders.md" ]]; then
+    intent="$(awk '
+      found && NF { print; exit }
+      /^## Mission/ { found=1 }
+    ' "$RUN_DIR/standing-orders.md" | cut -c1-200)"
+  fi
+  intent="${intent:-unknown}"
+
+  decision="$(classify "$intent")"
+
+  # Load status history
+  statuses=""
+  if [[ -f "$STATE_ROOT/status/$run_id.status" ]]; then
+    statuses="$(tail -3 "$STATE_ROOT/status/$run_id.status" | paste -sd '|' -)"
+  fi
+
+  python3 - "$TRACES_DIR/traces.jsonl" "$ts" "$run_id" "$model" "$kind" "$intent" "$decision" "$statuses" <<'PY'
+import json, sys
+path, ts, rid, model, kind, intent, decision, statuses = sys.argv[1:]
+rec = {
+    "ts": ts, "run_id": rid, "model": model, "kind": kind,
+    "intent": intent[:200], "decision": decision, "statuses": statuses,
+}
+with open(path, 'a') as f:
+    f.write(json.dumps(rec, sort_keys=True) + "\n")
+PY
+  echo "recorded: $run_id → $decision"
+}
+
+# ── quota check ────────────────────────────────────────────────────────────
+check_quota() {
+  local model="$1" dim="${2:-tokens}"
+
+  if [[ -f "$HOME/projects/odysseus/v2/src/sys_quota.py" ]]; then
+    local db="${SYS_QUOTA_DB:-$HOME/projects/odysseus/v2/data/quota.db}"
+    python3 "$HOME/projects/odysseus/v2/src/sys_quota.py" check --db "$db" --type "$dim" 2>/dev/null || echo "no quota data for $dim"
+  else
+    echo "sys_quota not available"
+  fi
+}
+
+# ── main ───────────────────────────────────────────────────────────────────
+main() {
+  local sub="${1:-}"
+  [[ -n "$sub" ]] || { usage; exit 0; }
+  shift || true
+
+  case "$sub" in
+    classify)
+      [[ $# -ge 1 ]] || die "classify requires intent text"
+      classify "$*"
+      ;;
+    record)
+      [[ $# -eq 1 ]] || die "record requires run id"
+      record_trace "$1"
+      ;;
+    check)
+      local model="" dim="tokens"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --quota) dim="$2"; shift 2 ;;
+          -h|--help) usage; exit 0 ;;
+          *) model="$1"; shift ;;
+        esac
+      done
+      [[ -n "$model" ]] || die "check requires model name"
+      check_quota "$model" "$dim"
+      ;;
+    help|-h|--help) usage ;;
+    *) die "unknown: $sub" ;;
+  esac
+}
+
+main "$@"
