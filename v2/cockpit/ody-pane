@@ -1,0 +1,472 @@
+#!/usr/bin/env lua
+-- ody-pane: tmux agent adapter — peek, send, key, status, watch, events
+--
+-- AXI-style compact output. Wraps tmux(1) capture-pane / send-keys with
+-- pane-hash stale detection, busy-signature matching, and a one-shot event
+-- watcher that writes a durable wake queue.
+--
+-- Usage:
+--   ody-pane list                              # list agent panes
+--   ody-pane peek <window> [--lines N]         # bounded capture
+--   ody-pane send <window> <text..>            # literal text + Enter
+--   ody-pane key <window> <key>                # send special key
+--   ody-pane status <window>                   # hash + busy + cmd
+--   ody-pane hash <window>                     # pane content md5
+--   ody-pane watch                             # one-shot event check
+--   ody-pane events-drain                      # drain wake queue
+--
+-- Window resolution: bare name "fm-xyz" or "session:window".
+-- Output: compact JSON per line (AXI-style). Pipe-friendly.
+
+-- Inline JSON encoding (no external dependency)
+local json = {
+  encode = function(val, indent, depth)
+    indent = indent or 0; depth = depth or 0
+    if depth > 20 then return '"<recursion>"' end
+    local t = type(val)
+    if t == "nil" then return "null"
+    elseif t == "boolean" then return tostring(val)
+    elseif t == "number" then return tostring(val)
+    elseif t == "string" then
+      return '"' .. val:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t') .. '"'
+    elseif t == "table" then
+      local is_arr = true
+      for k in pairs(val) do
+        if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then is_arr = false; break end
+      end
+      if is_arr and #val > 0 then
+        local parts = {}
+        for i = 1, #val do parts[#parts+1] = json.encode(val[i], indent, depth+1) end
+        return "[" .. table.concat(parts, ",") .. "]"
+      else
+        local parts = {}
+        for k, v in pairs(val) do
+          parts[#parts+1] = json.encode(k, indent, depth+1) .. ":" .. json.encode(v, indent, depth+1)
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+      end
+    else return '"' .. tostring(val) .. '"'
+    end
+  end
+}
+
+local TMUX = "tmux"
+local BUSY_RE = "esc (to )?interrupt|Working%.%.%."
+local FM_HOME = os.getenv("FM_ROOT") or (os.getenv("HOME") .. "/.firstmate")
+local STATE_DIR = FM_HOME .. "/state"
+local WAKE_QUEUE = STATE_DIR .. "/.wake-queue"
+local SPAWN_DIR = os.getenv("SPAWN_DIR") or (os.getenv("HOME") .. "/.spawned")
+
+-- ── helpers ──────────────────────────────────────────────────────────────
+local function die(msg, code)
+  io.stderr:write("ody-pane: " .. msg .. "\n")
+  os.exit(code or 1)
+end
+
+local function shell(args)
+  local cmd_str
+  if type(args) == "table" then
+    local parts = {}
+    for _, a in ipairs(args) do
+      if a:find("[^a-zA-Z0-9_./@#%%+:,=-]") then
+        parts[#parts+1] = "'" .. a:gsub("'", "'\\''") .. "'"
+      else
+        parts[#parts+1] = a
+      end
+    end
+    cmd_str = table.concat(parts, " ")
+  else
+    cmd_str = args
+  end
+  local f = io.popen(cmd_str .. " 2>/dev/null", "r")
+  if not f then return "", false end
+  local out = f:read("*a")
+  local ok, _, code = f:close()
+  return out or "", ok == nil and code == 0 or ok
+end
+
+local function md5(s)
+  local esc = s:gsub("'", "'\\''")
+  local cmd = "printf '%s' '" .. esc .. "' | md5 -q 2>/dev/null || md5sum 2>/dev/null | cut -d' ' -f1"
+  local f = io.popen(cmd, "r")
+  if not f then return "" end
+  local h = f:read("*a") or ""
+  f:close()
+  return h:gsub("%s+$", "")
+end
+
+local function lines(s)
+  if not s then return {} end
+  local t = {}
+  for l in s:gmatch("[^\n]+") do
+    t[#t+1] = l
+  end
+  return t
+end
+
+-- Resolve "fm-xyz" or "session:window" or "session_name_prefix" to "session:window"
+local function resolve_win(w)
+  if w:find(":") then return w end
+  local out, _ = shell({TMUX, "list-windows", "-a", "-F", "#{session_name}:#{window_name}"})
+  if not out then return nil end
+  -- Try exact match first
+  for line in out:gmatch("[^\n]+") do
+    if line:match("^" .. w .. ":") or line:match(":" .. w .. "$") then return line end
+  end
+  -- Try substring prefix match
+  for line in out:gmatch("[^\n]+") do
+    local s, wn = line:match("(.-):(.*)")
+    if s and s:match("^" .. w) then return line end
+  end
+  return nil
+end
+
+local function escape_json(s)
+  return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t')
+end
+
+-- ── subcommands ──────────────────────────────────────────────────────────
+
+local cmds = {}
+
+-- list: all agent panes with hash + busy + preview
+function cmds.list(args)
+  local lines_flag = 8
+  for i, a in ipairs(args) do
+    if a == "--lines" and args[i+1] then lines_flag = tonumber(args[i+1]) or 8 end
+  end
+
+  local out, _ = shell({TMUX, "list-panes", "-a", "-F",
+    "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{pane_index}"})
+
+  if not out or out == "" then
+    print(json.encode({panes = {}, error = "no tmux session found", count = 0}))
+    return
+  end
+
+  local panes = {}
+  for line in out:gmatch("[^\n]+") do
+    local session, window_name, pane_id, pane_cmd, active, idx = line:match("(.-)\t(.-)\t(.-)\t(.-)\t(.-)\t(.*)")
+    if not session then goto continue end
+    local preview_out, _ = shell({TMUX, "capture-pane", "-p", "-t", pane_id, "-J"})
+    local raw_lines = lines(preview_out)
+    local preview = {}
+    for j = math.max(1, #raw_lines - lines_flag + 1), #raw_lines do
+      preview[#preview + 1] = raw_lines[j]
+    end
+    local full_text = table.concat(raw_lines, "\n")
+    local h = md5(full_text)
+    local last6 = {}
+    for j = math.max(1, #raw_lines - 6 + 1), #raw_lines do
+      local trimmed = raw_lines[j]:match("^%s*(.-)%s*$")
+      if trimmed and trimmed ~= "" then last6[#last6+1] = trimmed end
+    end
+    local last6str = table.concat(last6, "\n")
+    local is_busy = last6str ~= "" and (last6str:lower():find(BUSY_RE) ~= nil)
+    panes[#panes+1] = {
+      session = session, window = window_name, pane = pane_id,
+      cmd = pane_cmd, active = (active == "1"),
+      hash = h, busy = is_busy,
+      preview = preview,
+    }
+    ::continue::
+  end
+
+  io.write('{"panes":[')
+  for i, p in ipairs(panes) do
+    if i > 1 then io.write(",") end
+    io.write('{"session":"')
+    io.write(escape_json(p.session))
+    io.write('","window":"')
+    io.write(escape_json(p.window))
+    io.write('","pane":"')
+    io.write(p.pane)
+    io.write('","cmd":"')
+    io.write(escape_json(p.cmd))
+    io.write('","active":')
+    io.write(tostring(p.active))
+    io.write(',"hash":"')
+    io.write(p.hash)
+    io.write('","busy":')
+    io.write(tostring(p.busy))
+    io.write(',"preview":[')
+    for j, l in ipairs(p.preview) do
+      if j > 1 then io.write(",") end
+      io.write('"')
+      io.write(escape_json(l))
+      io.write('"')
+    end
+    io.write(']}')
+  end
+  io.write('],"count":' .. #panes .. '}\n')
+end
+
+-- peek <window> [--lines N]
+function cmds.peek(args)
+  if #args < 1 then die("usage: ody-pane peek <window> [--lines N]") end
+  local win = args[1]
+  local n = 40
+  for i = 2, #args do
+    if args[i] == "--lines" and args[i+1] then n = tonumber(args[i+1]) or 40 end
+  end
+  local resolved = resolve_win(win)
+  if not resolved then die("no such window: " .. win, 2) end
+  local out, _ = shell({TMUX, "capture-pane", "-p", "-t", resolved, "-J"})
+  if not out then die("failed to capture pane: " .. resolved, 3) end
+  local raw_lines = lines(out)
+  local preview = {}
+  for i = math.max(1, #raw_lines - n + 1), #raw_lines do
+    preview[#preview + 1] = raw_lines[i]
+  end
+  local full_text = table.concat(raw_lines, "\n")
+  local h = md5(full_text)
+  local pane_cmd, _ = shell({TMUX, "display-message", "-p", "-t", resolved, "#{pane_current_command}"})
+  pane_cmd = (pane_cmd or ""):gsub("%s+$", "")
+  io.write('{"window":"')
+  io.write(escape_json(resolved))
+  io.write('","cmd":"')
+  io.write(escape_json(pane_cmd))
+  io.write('","hash":"')
+  io.write(h)
+  io.write('","lines":')
+  io.write(tostring(#raw_lines))
+  io.write(',"preview":[')
+  for i, l in ipairs(preview) do
+    if i > 1 then io.write(",") end
+    io.write('"')
+    io.write(escape_json(l))
+    io.write('"')
+  end
+  io.write(']}\n')
+end
+
+-- send <window> <text...>
+function cmds.send(args)
+  if #args < 2 then die("usage: ody-pane send <window> <text>") end
+  local win = args[1]
+  local text = table.concat(args, " ", 2)
+  local resolved = resolve_win(win)
+  if not resolved then die("no such window: " .. win, 2) end
+  local ok1 = shell({TMUX, "send-keys", "-t", resolved, "-l", text})
+  if not ok1 then die("send-keys failed", 3) end
+  -- Slash commands open completion popups; give them time to settle
+  if text:match("^/") then
+    local sleep_cmd = "perl -e 'select undef,undef,undef,1.2'"
+    shell({"sh", "-c", sleep_cmd})
+  else
+    local sleep_cmd = "perl -e 'select undef,undef,undef,0.3'"
+    shell({"sh", "-c", sleep_cmd})
+  end
+  local ok2 = shell({TMUX, "send-keys", "-t", resolved, "Enter"})
+  if not ok2 then die("send-keys Enter failed", 3) end
+  io.write('{"ok":true,"window":"')
+  io.write(escape_json(resolved))
+  io.write('","text":"')
+  io.write(escape_json(text))
+  io.write('"}\n')
+end
+
+-- key <window> <key>
+function cmds.key(args)
+  if #args < 2 then die("usage: ody-pane key <window> <key>") end
+  local win = args[1]
+  local key = args[2]
+  local resolved = resolve_win(win)
+  if not resolved then die("no such window: " .. win, 2) end
+  local ok = shell({TMUX, "send-keys", "-t", resolved, key})
+  if not ok then die("send-keys failed", 3) end
+  io.write('{"ok":true,"window":"')
+  io.write(escape_json(resolved))
+  io.write('","key":"')
+  io.write(escape_json(key))
+  io.write('"}\n')
+end
+
+-- status <window>
+function cmds.status(args)
+  if #args < 1 then die("usage: ody-pane status <window>") end
+  local win = args[1]
+  local resolved = resolve_win(win)
+  if not resolved then die("no such window: " .. win, 2) end
+  local out, _ = shell({TMUX, "capture-pane", "-p", "-t", resolved, "-J"})
+  if not out then die("failed to capture pane: " .. resolved, 3) end
+  local raw_lines = lines(out)
+  local full_text = table.concat(raw_lines, "\n")
+  local h = md5(full_text)
+  local pane_cmd, _ = shell({TMUX, "display-message", "-p", "-t", resolved, "#{pane_current_command}"})
+  pane_cmd = (pane_cmd or ""):gsub("%s+$", "")
+  local last6 = {}
+  for i = math.max(1, #raw_lines - 6 + 1), #raw_lines do
+    local trimmed = raw_lines[i]:match("^%s*(.-)%s*$")
+    if trimmed and trimmed ~= "" then last6[#last6+1] = trimmed end
+  end
+  local last6str = table.concat(last6, "\n")
+  local is_busy = last6str ~= "" and (last6str:lower():find(BUSY_RE) ~= nil)
+  io.write('{"window":"')
+  io.write(escape_json(resolved))
+  io.write('","cmd":"')
+  io.write(escape_json(pane_cmd))
+  io.write('","hash":"')
+  io.write(h)
+  io.write('","busy":')
+  io.write(tostring(is_busy))
+  io.write(',"lines":')
+  io.write(tostring(#raw_lines))
+  io.write('}\n')
+end
+
+-- hash <window>
+function cmds.hash(args)
+  if #args < 1 then die("usage: ody-pane hash <window>") end
+  local win = args[1]
+  local resolved = resolve_win(win)
+  if not resolved then die("no such window: " .. win, 2) end
+  local out, _ = shell({TMUX, "capture-pane", "-p", "-t", resolved, "-J"})
+  if not out then die("failed to capture pane: " .. resolved, 3) end
+  local h = md5(out)
+  io.write('{"window":"')
+  io.write(escape_json(resolved))
+  io.write('","hash":"')
+  io.write(h)
+  io.write('"}\n')
+end
+
+-- watch: one-shot event detection
+function cmds.watch(args)
+  local queue_file = WAKE_QUEUE
+  for i, a in ipairs(args) do
+    if a == "--queue" and args[i+1] then queue_file = args[i+1] end
+  end
+
+  -- Scan for fm-* windows
+  local out, _ = shell({TMUX, "list-windows", "-a", "-F", "#{session_name}:#{window_name}"})
+  if not out then
+    io.write('{"event":"none","reason":"no tmux session"}\n')
+    return
+  end
+
+  local events = {}
+  for line in out:gmatch("[^\n]+") do
+    if line:find(":fm%-") then
+      local cap, _ = shell({TMUX, "capture-pane", "-p", "-t", line, "-J"})
+      if not cap then goto continue end
+      local raw_lines = lines(cap)
+      local full_text = table.concat(raw_lines, "\n")
+      local h = md5(full_text)
+
+      -- Write hash to state dir for stale detection
+      local safe_name = line:gsub("[:./]", "_")
+      local hash_file = STATE_DIR .. "/.ody-hash-" .. safe_name
+      local prev = ""
+      local pf = io.open(hash_file, "r")
+      if pf then prev = pf:read("*a") or ""; pf:close() end
+      local hf = io.open(hash_file, "w")
+      if hf then hf:write(h); hf:close() end
+
+      if prev ~= h and prev ~= "" then
+        events[#events+1] = {window = line, event = "changed", hash = h}
+      end
+    end
+    ::continue::
+  end
+
+  if #events > 0 then
+    -- Write wake queue
+    local qf = io.open(queue_file, "a")
+    if qf then
+      local ts = os.time()
+      local seq = 1
+      for _, ev in ipairs(events) do
+        local payload = ts .. "\t" .. seq .. "\tsignal\t" .. ev.window .. "\t" .. ev.event
+        qf:write(payload .. "\n")
+        seq = seq + 1
+      end
+      qf:close()
+    end
+    io.write('{"event":"signal","windows":[')
+    for i, ev in ipairs(events) do
+      if i > 1 then io.write(",") end
+      io.write('{"window":"')
+      io.write(escape_json(ev.window))
+      io.write('","event":"')
+      io.write(ev.event)
+      io.write('"}')
+    end
+    io.write('],"count":' .. #events .. '}\n')
+  else
+    io.write('{"event":"none","reason":"no changes detected","count":0}\n')
+  end
+end
+
+-- events-drain: atomically drain the wake queue
+function cmds.events_drain(args)
+  local queue_file = WAKE_QUEUE
+  for i, a in ipairs(args) do
+    if a == "--queue" and args[i+1] then queue_file = args[i+1] end
+  end
+
+  local f = io.open(queue_file, "r")
+  if not f then
+    io.write('{"events":[],"count":0}\n')
+    return
+  end
+  local content = f:read("*a")
+  f:close()
+
+  -- Clear the queue
+  local qf = io.open(queue_file, "w")
+  if qf then qf:close() end
+
+  local parsed_events = {}
+  for line in content:gmatch("[^\n]+") do
+    local ts, seq, kind, key, payload = line:match("(%d+)\t(%d+)\t(%S+)\t(%S+)\t(.+)")
+    if ts then
+      parsed_events[#parsed_events+1] = {
+        timestamp = tonumber(ts), seq = tonumber(seq),
+        kind = kind, key = key, payload = payload
+      }
+    end
+  end
+  io.write('{"events":[')
+  for i, ev in ipairs(parsed_events) do
+    if i > 1 then io.write(",") end
+    io.write('{"ts":' .. ev.timestamp)
+    io.write(',"seq":' .. ev.seq)
+    io.write(',"kind":"')
+    io.write(escape_json(ev.kind))
+    io.write('","key":"')
+    io.write(escape_json(ev.key))
+    io.write('","payload":"')
+    io.write(escape_json(ev.payload))
+    io.write('"}')
+  end
+  io.write('],"count":' .. #parsed_events .. '}\n')
+end
+
+-- ── main ─────────────────────────────────────────────────────────────────
+if #arg < 1 then
+  io.write([[
+ody-pane: tmux agent adapter
+  subcommands: list, peek, send, key, status, hash, watch, events-drain
+
+  list                              — all panes with hash + busy
+  peek <window> [--lines N]         — capture pane tail
+  send <window> <text...>           — send literal text + Enter
+  key <window> Escape|Enter|C-c     — send a key
+  status <window>                   — hash + busy + cmd
+  hash <window>                     — pane content md5
+  watch [--queue <file>]            — one-shot event detection
+  events-drain [--queue <file>]     — drain wake queue
+]])
+  os.exit(0)
+end
+
+local sub = arg[1]
+local subargs = {}
+for i = 2, #arg do subargs[i-1] = arg[i] end
+
+if cmds[sub] then
+  cmds[sub](subargs)
+else
+  die("unknown subcommand: " .. sub .. "\navailable: " .. table.concat({"list","peek","send","key","status","hash","watch","events-drain"}, ", "))
+end
