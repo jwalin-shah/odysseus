@@ -21,9 +21,20 @@ async function checkPrDescription({ github, context, core }) {
 
   // Extract the text content of a Section. Matches any heading depth (#, ##,
   // ###, …) so the check doesn't break if the template's heading level changes.
+  // ODYSSEUS-CI: heading is escaped before regex interpolation so a future
+  // call site with a heading containing regex metacharacters (e.g. "Type of
+  // Change (Foo)") cannot silently break the match. The previous form was
+  // `m?.[0].replace(...)` which depends on optional-chaining short-circuit
+  // semantics for undefined access — that semantics is engine-dependent
+  // (Node 20 throws, Node 22+ silently short-circuits), so the guard is now
+  // explicit: if m is null, return ''. If body is null/undefined, return ''.
   function section(heading) {
-    const m = body.match(new RegExp(`#+\\s+${heading}[\\s\\S]*?(?=\\n#+\\s+|$)`, 'i'));
-    return strip(m?.[0].replace(new RegExp(`#+\\s+${heading}`, 'i'), '') ?? '');
+    if (body == null) return '';
+    const safe = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`#+\\s+${safe}[\\s\\S]*?(?=\\n#+\\s+|$)`, 'i');
+    const m  = body.match(re);
+    if (!m) return '';
+    return strip(m[0].replace(new RegExp(`#+\\s+${safe}`, 'i'), ''));
   }
 
   const problems = [];
