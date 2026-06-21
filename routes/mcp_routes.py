@@ -2,6 +2,7 @@
 """MCP (Model Context Protocol) server management routes."""
 import json
 import os
+import re
 import uuid
 import urllib.parse
 import html
@@ -17,6 +18,108 @@ from src.constants import DATA_DIR
 from src.mcp_manager import McpManager
 
 logger = logging.getLogger(__name__)
+
+
+# ODYSSEY-OAUTH-LOG: OAuth client_secret is a long-lived credential. It must
+# never appear in log output — log aggregation systems, error trackers, and
+# CI artefacts all retain log lines for far longer than the request that
+# emitted them. _redact_secrets scrubs every known secret-bearing key
+# (client_secret, access_token, refresh_token, id_token) before the record
+# is emitted. Applied to the local logger via _SafeLogRecordFactory so any
+# call site that uses this module's `logger` is covered without per-call
+# boilerplate. Exposed at module scope so the regression test can drive it
+# directly.
+_SECRET_KEYS = ("client_secret", "access_token", "refresh_token", "id_token")
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace any `key=value` or `"key": "value"` pair where key is in
+    _SECRET_KEYS with `key=<REDACTED>` / `"key": "<REDACTED>"`."""
+    if not text:
+        return text
+    out = text
+    for key in _SECRET_KEYS:
+        # Quoted JSON form: "client_secret": "abc123" → "client_secret": "<REDACTED>"
+        out = re.sub(
+            rf'("{re.escape(key)}"\s*:\s*)"[^"]*"',
+            rf'\1"<REDACTED>"',
+            out,
+        )
+        # logfmt / form / kwarg form: client_secret=abc123 → client_secret=<REDACTED>
+        out = re.sub(
+            rf'\b{re.escape(key)}\s*=\s*[^\s,)}}]+',
+            f"{key}=<REDACTED>",
+            out,
+        )
+        # Python repr form: 'client_secret': 'abc123' → 'client_secret': '<REDACTED>'
+        out = re.sub(
+            rf"('{re.escape(key)}'\s*:\s*)'[^']*'",
+            rf"\1'<REDACTED>'",
+            out,
+        )
+    return out
+
+
+class _SafeLogRecordFactory:
+    """logging.setLogRecordFactory replacement that scrubs secret values
+    out of every emitted record's formatted message and arguments."""
+
+    def __init__(self, base_factory):
+        self._base = base_factory
+
+    def __call__(self, *args, **kwargs):
+        record = self._base(*args, **kwargs)
+        try:
+            # Scrub positional %-args so a secret passed via
+            # logger.info("client_secret=%s", value) cannot survive the
+            # % substitution later. We rewrite the format string to a
+            # plain message and drop the args entirely — once a secret
+            # is in the formatted output we don't need the original
+            # placeholder any more, and we can't predict how many
+            # placeholders remain after a partial scrub.
+            if record.args:
+                scrubbed_args = tuple(
+                    _redact_secrets(a) if isinstance(a, str) else a
+                    for a in record.args
+                )
+                if all(isinstance(a, str) for a in scrubbed_args) and record.args:
+                    # Substitute the (already-scrubbed) args now and clear
+                    # the placeholder machinery so getMessage() doesn't
+                    # re-raise TypeError on a placeholder count mismatch.
+                    try:
+                        record.msg = record.msg % scrubbed_args
+                    except (TypeError, ValueError):
+                        # Placeholder count drift after scrub — fall back
+                        # to the safe form: append scrubbed args to msg.
+                        record.msg = f"{record.msg} {scrubbed_args}"
+                    record.args = ()
+                else:
+                    record.args = scrubbed_args
+            if isinstance(record.msg, str):
+                record.msg = _redact_secrets(record.msg)
+        except Exception:  # never let a logging filter break the app
+            pass
+        return record
+
+
+# Install the safe factory once per process. Multiple imports of this module
+# are idempotent: setLogRecordFactory always replaces, and the previous
+# factory is wrapped, so layering is safe. The idempotency check is
+# factored out so the regression test can drive it directly without
+# needing to reload the module.
+def _install_safe_factory() -> None:
+    """Install the safe factory iff one is not already the live factory.
+
+    Idempotent under repeated calls and module re-imports: a re-import
+    observes the existing `_SafeLogRecordFactory` and no-ops.
+    """
+    current = logging.getLogRecordFactory()
+    if not isinstance(current, _SafeLogRecordFactory):
+        logging.setLogRecordFactory(_SafeLogRecordFactory(current))
+
+
+_install_safe_factory()
+
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
