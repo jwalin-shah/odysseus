@@ -36,7 +36,7 @@ usage() {
 ody-crew: Odysseus firstmate-style coordinator
 
 Commands:
-  spawn --kind scout|ship --repo <path> --task "..." [--id <id>] [--cmd <cmd>]
+  spawn --kind scout|ship --repo <path> --task "..." [--id <id>] [--cmd <cmd>] [--model <model>]
   status
   watch
   peek <id> [lines]
@@ -48,6 +48,9 @@ Commands:
 Kinds:
   scout  report-only; no no-mistakes push
   ship   code-changing task; use no-mistakes before upstream push
+
+Flags (spawn):
+  --model <model>  Override auto-routing and use this model
 USAGE
 }
 
@@ -173,7 +176,7 @@ EOF
 }
 
 cmd_spawn() {
-  local kind="" repo="" task="" id="" cmd=""
+  local kind="" repo="" task="" id="" cmd="" model_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --kind) kind="$2"; shift 2 ;;
@@ -181,6 +184,7 @@ cmd_spawn() {
       --task) task="$2"; shift 2 ;;
       --id) id="$2"; shift 2 ;;
       --cmd) cmd="$2"; shift 2 ;;
+      --model) model_override="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown spawn flag: $1" ;;
     esac
@@ -189,7 +193,7 @@ cmd_spawn() {
   [[ -n "$repo" ]] || die "--repo required"
   [[ -n "$task" ]] || die "--task required"
 
-  local repo_abs slug suffix rid dir status session model orders workdir
+  local repo_abs slug suffix rid dir status session model orders workdir model_source
   repo_abs="$(resolve_repo "$repo")"
   slug="$(slugify "$task")"
   suffix="$(python3 - <<'PY'
@@ -200,13 +204,48 @@ PY
   rid="${id:-${kind}-${slug}-${suffix}}"
   dir="$(run_dir "$rid")"
   [[ ! -e "$dir" ]] || die "run id already exists: $rid"
+
+  # ── P5: run-id prefix dedup ────────────────────────────────────────────────
+  # Warn if any existing run id is a prefix of the new id (or vice-versa), to
+  # catch accidental re-dispatch of the same logical workpack.
+  for existing_dir in "$RUNS_DIR"/*/; do
+    [[ -d "$existing_dir" ]] || continue
+    local existing_id
+    existing_id="$(basename "$existing_dir")"
+    if [[ "$rid" == "${existing_id}"* || "$existing_id" == "${rid}"* ]]; then
+      echo "ody-crew: warning: new id '$rid' shares prefix with existing run '$existing_id' — possible duplicate dispatch" >&2
+    fi
+  done
+
   mkdir -p "$dir"
   status="$STATUS_DIR/$rid.status"
   : > "$status"
   write_status "$rid" "preflight" "repo=$repo_abs kind=$kind"
 
-  model="$(pick_model "$task")"
-  write_status "$rid" "preflight" "model=$model"
+  # ── P3: model selection ────────────────────────────────────────────────────
+  if [[ -n "$model_override" ]]; then
+    model="$model_override"
+    model_source="override"
+  else
+    model="$(pick_model "$task")"
+    model_source="auto"
+  fi
+  write_status "$rid" "preflight" "model=$model source=$model_source"
+
+  # ── P3: quota preflight ────────────────────────────────────────────────────
+  if command -v ody-policy >/dev/null 2>&1; then
+    local quota_result quota_exit
+    quota_result="$(ody-policy check "$model" 2>&1)" || quota_exit=$?
+    quota_exit="${quota_exit:-0}"
+    if [[ "$quota_exit" -eq 75 ]]; then
+      write_status "$rid" "rejected" "quota exhausted for $model"
+      record_event "rejected" "$rid" "quota exhausted for $model"
+      rmdir "$dir" 2>/dev/null || true
+      echo "quota exhausted for $model" >&2
+      exit 75
+    fi
+    write_status "$rid" "preflight" "quota=$quota_result"
+  fi
 
   # Acquire worktree. For now treehouse opens an interactive subshell, so spawn
   # the worker in repo_abs and record that treehouse is available. ody-crew will
@@ -232,11 +271,12 @@ WORKDIR='$workdir'
 SESSION='$session'
 TASK='$(printf '%s' "$task" | sed "s/'/'\\''/g")'
 MODEL='$model'
+MODEL_SOURCE='$model_source'
 ORDERS='$orders'
 CREATED_AT='$(now_utc)'
 EOF
 
-  record_event "spawn" "$rid" "kind=$kind repo=$repo_abs model=$model"
+  record_event "spawn" "$rid" "kind=$kind repo=$repo_abs model=$model source=$model_source"
   write_status "$rid" "spawn" "session=$session"
 
   "$TMUX" new-session -d -s "$session" -c "$workdir" -x 220 -y 50
@@ -262,11 +302,18 @@ EOF
   "$TMUX" send-keys -t "$session" "$launch" Enter
 
   write_status "$rid" "running" "launched"
+
+  # ── P3: record routing decision after successful spawn ─────────────────────
+  if command -v ody-policy >/dev/null 2>&1; then
+    ody-policy record "$rid" >/dev/null 2>&1 || true
+    write_status "$rid" "preflight" "policy-recorded"
+  fi
+
   echo "$rid"
   echo "  kind:    $kind"
   echo "  repo:    $repo_abs"
   echo "  workdir: $workdir"
-  echo "  model:   $model"
+  echo "  model:   $model ($model_source)"
   echo "  tmux:    $session"
   echo "  orders:  $orders"
   echo "  attach:  tmux attach -t $session"
@@ -360,6 +407,17 @@ cmd_teardown() {
     "$TMUX" kill-session -t "$SESSION"
   fi
   record_event "teardown" "$id" "session killed"
+
+  # ── ship-without-no-mistakes warning ──────────────────────────────────────
+  # If this was a ship task, check that no-mistakes was actually invoked
+  # (evidenced by a "ship" status line) before teardown.
+  if [[ "$KIND" == "ship" ]]; then
+    if ! grep -q $'\tship\t' "$STATUS_DIR/$id.status" 2>/dev/null; then
+      echo "ody-crew: warning: ship task was not shipped through no-mistakes" >&2
+      record_event "teardown-warn" "$id" "ship task torn down without no-mistakes"
+    fi
+  fi
+
   write_status "$id" "done" "teardown complete"
 }
 
