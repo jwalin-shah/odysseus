@@ -96,9 +96,13 @@ record_trace() {
     kind="${KIND:-}"
   fi
 
-  # Read standing orders for intent
+  # Read standing orders for intent. The mission text starts after the
+  # "## Mission" heading with a blank separator line, so skip blank lines.
   if [[ -f "$RUN_DIR/standing-orders.md" ]]; then
-    intent="$(grep -A1 '## Mission' "$RUN_DIR/standing-orders.md" | tail -1 | cut -c1-120)"
+    intent="$(awk '
+      found && NF { print; exit }
+      /^## Mission/ { found=1 }
+    ' "$RUN_DIR/standing-orders.md" | cut -c1-200)"
   fi
   intent="${intent:-unknown}"
 
