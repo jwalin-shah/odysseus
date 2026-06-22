@@ -5,7 +5,6 @@ import io
 import logging
 import httpx
 import tempfile
-import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -128,12 +127,10 @@ class STTService:
             if language:
                 kwargs["language"] = language
 
-            t0 = time.perf_counter()
             segments, info = model.transcribe(tmp_path, **kwargs)
             text = " ".join(seg.text.strip() for seg in segments)
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-            logger.info(f"Local STT: {len(text)} chars, lang={info.language}, prob={info.language_probability:.2f}, {elapsed_ms}ms")
+            logger.info(f"Local STT: {len(text)} chars, lang={info.language}, prob={info.language_probability:.2f}")
             return text
         except Exception as e:
             logger.error(f"Local STT transcription failed: {e}", exc_info=True)
@@ -196,13 +193,11 @@ class STTService:
                 tmp_path = tmp.name
 
             # Load audio and transcribe
-            t0 = time.perf_counter()
             audio = m.load_audio(tmp_path)
             tokens = model.generate(audio)
             text = self._moonshine_tokenizer.decode_batch(tokens)[0]
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-            logger.info(f"Moonshine STT: {len(text)} chars, {elapsed_ms}ms")
+            logger.info(f"Moonshine STT: {len(text)} chars")
             return text
         except Exception as e:
             logger.error(f"Moonshine STT transcription failed: {e}", exc_info=True)
@@ -304,7 +299,6 @@ class STTService:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
 
-            t0 = time.perf_counter()
             audio = m.load_audio(tmp_path)  # float32 [1, N]
 
             # Pad to the fixed encoder window (10s = 160000 samples at 16kHz)
@@ -385,8 +379,7 @@ class STTService:
                     onehot[0, 0, next_pos, 0] = 1.0
 
             text = self._moonshine_tokenizer.decode_batch([tokens])[0]
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            logger.info(f"Moonshine CoreML STT: {len(text)} chars, {len(tokens)} tokens, {elapsed_ms}ms")
+            logger.info(f"Moonshine CoreML STT: {len(text)} chars, {len(tokens)} tokens")
             return text
         except Exception as e:
             logger.error(f"Moonshine CoreML STT transcription failed: {e}", exc_info=True)
@@ -477,7 +470,6 @@ class STTService:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
 
-            t0 = time.perf_counter()
             audio = m.load_audio(tmp_path)  # float32 [1, N]
 
             # Always pad/clip to 10s so encoder output is exactly S_ENC_MAX=500 frames.
@@ -559,8 +551,7 @@ class STTService:
                     onehot[0, 0, next_pos, 0] = 1.0
 
             text = self._moonshine_tokenizer.decode_batch([tokens])[0]
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            logger.info(f"Moonshine streaming CoreML STT: {len(text)} chars, {len(tokens)} tokens, {elapsed_ms}ms")
+            logger.info(f"Moonshine streaming CoreML STT: {len(text)} chars, {len(tokens)} tokens")
             return text
         except Exception as e:
             logger.error(f"Moonshine streaming CoreML STT failed: {e}", exc_info=True)
