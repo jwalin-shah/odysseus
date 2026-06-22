@@ -9,13 +9,51 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
 	"strings"
 
 	aii "github.com/odysseus/ai_interaction/pkg/aiinteraction"
 )
 
+const usage = `aiinteraction-demo — exercise the aiinteraction package.
+
+USAGE
+  aiinteraction-demo [options]
+
+OPTIONS
+  --help        show this help and exit
+  --list-tests  print the names of every demo scenario, then exit
+
+DESCRIPTION
+  Walks the public surface of github.com/odysseus/ai_interaction/pkg/aiinteraction
+  using in-memory stubs for the interfaces the Python source wires against a
+  live Flask app + database. Prints a short scenario per package function so
+  reviewers can eyeball behaviour without spinning up the chat agent.
+`
+
 func main() {
+	help := flag.Bool("help", false, "show help and exit")
+	listTests := flag.Bool("list-tests", false, "print scenario names, then exit")
+	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	flag.Parse()
+	if *help {
+		fmt.Print(usage)
+		return
+	}
+	if *listTests {
+		fmt.Println("scenarios:")
+		fmt.Println("  pipeline: parse + validate")
+		fmt.Println("  manage_memory: add / list / search")
+		fmt.Println("  manage_rag: list / add_directory")
+		fmt.Println("  ui_control: toggle / set_mode / open_panel / open_email_reply")
+		fmt.Println("  generate_image: parse + classify")
+		fmt.Println("  model spec + dispatch")
+		fmt.Println("  stream: one final event")
+		return
+	}
+
 	fmt.Println("== aiinteraction demo ==")
 	fmt.Println()
 
