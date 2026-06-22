@@ -1,0 +1,12 @@
+#!/bin/bash
+if [ "$1" == "decompose" ]; then
+  cat << 'JSON'
+[
+  {"id": "subtask-1", "description": "Analyze the issue", "type": "research"},
+  {"id": "subtask-2", "description": "Fix the code", "type": "code"},
+  {"id": "subtask-3", "description": "Add tests", "type": "test"}
+]
+JSON
+elif [ "$1" == "spawn" ]; then
+  sleep 0.1
+fi
