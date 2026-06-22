@@ -63,6 +63,17 @@ type Manager struct {
 	// cached key are protected by keyMu so a Save racing with a load()
 	// never observes a torn key.
 	keyMu sync.RWMutex
+
+	// writeMu serializes the on-disk read+write of api_keys.json. The
+	// Python module's save() also has this race (last-writer-wins)
+	// but its non-atomic open()+write() can produce a partial file
+	// when two goroutines overlap. The Go port's atomicWrite would
+	// catch the partial write via the rename step, but the temp file
+	// collision still surfaces as a "no such file" error when one
+	// rename succeeds while the other is mid-create. Serializing
+	// here keeps the file parseable under contention without
+	// changing the per-call semantics.
+	writeMu sync.Mutex
 }
 
 // New constructs a Manager rooted at dataDir. If .key does not exist it
@@ -243,6 +254,10 @@ func (m *Manager) Save(provider, apiKey string) error {
 	if provider == "" {
 		return ErrEmptyProvider
 	}
+	// Serialize the on-disk read+write. See Manager.writeMu.
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+
 	ct, err := m.EncryptAPIKey(apiKey)
 	if err != nil {
 		return err

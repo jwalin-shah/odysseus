@@ -41,6 +41,16 @@ func main() {
 }
 
 func run(args []string, stdout, stderr *os.File) error {
+	// Intercept --help / -h so it prints usage on stdout and exits 0,
+	// matching the wave9 standing rule that demo CLIs exit 0 on help.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "-help" {
+			fmt.Fprintf(stdout, "Usage of apikeymanager-demo:\n")
+			printFlagDefaults(stdout)
+			return nil
+		}
+	}
+
 	fs := flag.NewFlagSet("apikeymanager-demo", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data-dir", ".apikeymanager-demo", "Directory holding .key and api_keys.json (created with 0o700 / 0o600).")
@@ -49,6 +59,8 @@ func run(args []string, stdout, stderr *os.File) error {
 	decrypt := fs.Bool("decrypt", false, "Decrypt the on-disk entry for --provider and print metadata.")
 	list := fs.Bool("list", false, "List every entry currently in api_keys.json (metadata only).")
 	if err := fs.Parse(args); err != nil {
+		// flag already prints the error to stderr (we wired SetOutput
+		// above); surface it as a Go error so the caller exits non-zero.
 		return err
 	}
 
@@ -144,4 +156,20 @@ func redactPrefix(s string) string {
 		return s + "..."
 	}
 	return strings.TrimRight(s[:keyPrefixDisplay], "\x00") + "..."
+}
+
+// printFlagDefaults renders a flag-block identical to flag.PrintDefaults
+// so the --help intercept path can keep the same look without invoking
+// flag.Parse (which would trip ContinueOnError on -h).
+func printFlagDefaults(w *os.File) {
+	fmt.Fprintln(w, "  -data-dir string")
+	fmt.Fprintln(w, "    \tDirectory holding .key and api_keys.json (created with 0o700 / 0o600). (default \".apikeymanager-demo\")")
+	fmt.Fprintln(w, "  -provider string")
+	fmt.Fprintln(w, "    \tProvider name to encrypt/decrypt under. (default \"demo\")")
+	fmt.Fprintln(w, "  -value string")
+	fmt.Fprintln(w, "    \tPlaintext API key to encrypt. Ignored when --decrypt or --list is set.")
+	fmt.Fprintln(w, "  -decrypt")
+	fmt.Fprintln(w, "    \tDecrypt the on-disk entry for --provider and print metadata.")
+	fmt.Fprintln(w, "  -list")
+	fmt.Fprintln(w, "    \tList every entry currently in api_keys.json (metadata only).")
 }
