@@ -1,96 +1,41 @@
-# cockpit.gsh — Optional gsh REPL wrapper for the Odysseus cockpit.
-#
-# Source this from ~/.gsh/repl.gsh or run directly:
-#   gsh -i -c "source v2/cockpit/cockpit.gsh"
-#
-# Adds middleware, aliases, and agent definitions that compose ody-*
-# commands into a captain-friendly interactive shell.
-#
-# Requirements (lazy — skip if missing, no hard crash):
-#   ody-crew, ody-pane, ody-summarize, ody-policy in PATH or ~/bin/
-#   gsh installed via brew or curl
+# cockpit.gsh — gsh REPL wrapper for the Odysseus cockpit (VERIFIED on gsh 1.11.0).
+# Load from ~/.gsh/repl.gsh with:  source("/Users/jwalinshah/projects/odysseus/v2/cockpit/cockpit.gsh")
 
-# ── Alias commands (work via gsh's POSIX compatibility) ────────────────────
-alias crew='ody-crew'
-alias pane='ody-pane'
-alias summ='ody-summarize'
-alias policy='ody-policy'
-
-# ── utility functions ──────────────────────────────────────────────────────
-captain_help() {
-  cat <<'END'
-Captain, these commands are available:
-
-  crew spawn --kind scout|ship --repo <path> --task "..." [--cmd "..."]
-  crew status
-  crew watch
-  crew peek <id> [lines]
-  crew send <id> <text...>
-  crew summarize <id>
-  crew ship <id>
-  crew teardown <id>
-
-  pane list|peek|status|hash|watch|events-drain
-
-  summ [--since 1h|24h|7d] [--run <id>] [--format markdown]
-  policy classify <intent>
-  policy record <run_id>
-  policy check <model> --quota <dim>
-END
+# ── captain help text ──────────────────────────────────────────────────────
+tool captain_help() {
+  print("Captain, these commands are available:")
+  print("  crew spawn|status|watch|peek|send|summarize|ship|teardown")
+  print("  pane list|peek|status|hash|watch|events-drain")
+  print("  summ [--since 1h|24h|7d] [--run <id>]")
+  print("  policy classify <intent>")
 }
 
-# ── middleware (intercepts gsh input, runs when relevant) ──────────────────
-# gsh middleware uses `gsh.use("command.input", fn)`.
-# If gsh is not available, these are no-ops.
+# ── middleware: route captain intent → ody-* subprocesses ──────────────────
+tool cockpitRouter(ctx, next) {
+  input = ctx.input.trim()
+  if (input == "") { return next(ctx) }
 
-if command -v gsh >/dev/null 2>&1; then
+  # explicit help
+  if (input == "help" || input == "captain") {
+    captain_help()
+    return { handled: true }
+  }
 
-tool classifyAndRoute(ctx, next) {
-  input = ctx.input
-  match(input) {
-    /^\/crew|^crew /  => true  # pass through, crew handles it
-    /^\/pane|^pane /  => true
-    /^\/summ|^summ /  => true
-    /^\/policy|^policy / => true
-    /^\/help|^help|^captain/ => print(captain_help())
-                                  return { handled: true }
-    /^(fix|investigate|research|look at|audit|check|find|implement|build) / => {
-      # Classify via ody-policy and suggest crew spawn
-      decision = exec("ody-policy classify " + input)
-      print("→ " + decision.stdout.strip())
-      print("  Try: crew spawn --kind " + decision.stdout.strip() +
-            " --repo <path> --task \"" + input + "\"")
+  # natural-language intent verbs → classify via ody-policy, suggest a spawn
+  verbs = ["fix ", "investigate ", "research ", "look at ", "audit ", "check ", "find ", "implement ", "build "]
+  for (v of verbs) {
+    if (input.startsWith(v)) {
+      decision = exec(`ody-policy classify ${input}`)
+      kind = decision.stdout.trim()
+      print(`→ ody-policy says: ${kind}`)
+      print(`  Try: crew spawn --kind ${kind} --task "${input}"`)
       return { handled: true }
     }
-    /./ => {  # passthrough for all other input
-      return next(ctx)
-    }
   }
+
+  # everything else: fall through to the shell (crew/pane/summ run as commands)
+  return next(ctx)
 }
 
-gsh.use("command.input", classifyAndRoute)
-
-
-tool scoutAgent {
-  model: gsh.models.workhorse,
-  systemPrompt: "You are a scout: you investigate, analyze, and report. Never modify files.",
-}
-
-tool shipAgent {
-  model: gsh.models.best,
-  systemPrompt: "You are a ship agent: you implement fixes, write tests, and ship through no-mistakes.",
-}
-
-tool summarizer {
-  model: gsh.models.cheap,
-  systemPrompt: "Compress tool traces and events into hypernym summaries.",
-}
-
-end
-
-# ── fallback: help when not in gsh ────────────────────────────────────────
-if [ -z "${GSH_SHELL:-}" ]; then
-  echo "cockpit.gsh: sourced from a plain shell — ody-* commands are available by alias."
-  echo "  For the full REPL experience, run: gsh -i"
-  echo "  Or: source cockpit.gsh inside gsh"
-fi
+gsh.use("command.input", cockpitRouter)
+print("cockpit.gsh loaded — type 'help' for captain commands")
