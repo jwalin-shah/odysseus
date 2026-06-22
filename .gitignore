@@ -60,6 +60,13 @@ Thumbs.db
 cache/
 output.txt.txt
 
+# Go build artifacts
+*.exe
+*.test
+*.out
+cmd/*/[!._]*.go
+go.work
+
 # Media (uploaded/generated)
 *.jpg
 *.jpeg
