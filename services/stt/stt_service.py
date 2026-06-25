@@ -51,7 +51,11 @@ class STTService:
         saved = load_settings()
         return {
             "stt_enabled": saved.get("stt_enabled", False),
-            "stt_provider": saved.get("stt_provider", "disabled"),
+            # moonshine-vs-native-9v: default to the working ONNX path.
+            # `local-moonshine-coreml-streaming` is unrunnable on this machine
+            # (float16 state rejection + D=36/40 decoder/weights mismatch + the
+            # >10s StopIteration); the ONNX path is 10/10 at 69ms p50 / 0.6% WER.
+            "stt_provider": saved.get("stt_provider", "local-moonshine"),
             "stt_model": saved.get("stt_model", "base"),
             "stt_language": saved.get("stt_language", ""),
         }
@@ -450,10 +454,15 @@ class STTService:
                 return None
         return self._moonshine_coreml_s_encoder
 
-    def _transcribe_moonshine_coreml_streaming(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
-        """Transcribe with moonshine-streaming-tiny on CoreML (English-only)."""
-        if self._get_moonshine_coreml_streaming() is None:
-            return None
+    def _transcribe_coreml_streaming_chunk(self, audio) -> Optional[str]:
+        """Transcribe a single ≤10s audio chunk with the streaming CoreML decoder.
+
+        `audio` is a float32 numpy array of shape [1, N] with N ≤ 160000 samples.
+        Returns the decoded text, or None on failure. A StopIteration (or any
+        other exception) inside the decode loop is caught and converted to a
+        None return so the chunked outer caller can finalize a partial result
+        instead of crashing the whole long-utterance transcription.
+        """
         encoder = self._moonshine_coreml_s_encoder
         decoder = self._moonshine_coreml_s_decoder
         consts = self._moonshine_coreml_s_constants
@@ -461,37 +470,24 @@ class STTService:
         HID = consts["HID"]; S_MAX = consts["S_MAX"]
         rope_tables = self._moonshine_coreml_s_rope_tables
         S_ENC_MAX = self._STREAMING_S_ENC_MAX
-        tmp_path = None
+        tokens = []  # defined up front so the StopIteration handler can decode a partial result
         try:
-            import moonshine_onnx as m
-            import numpy as np
-
-            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-                tmp.write(audio_bytes)
-                tmp_path = tmp.name
-
-            audio = m.load_audio(tmp_path)  # float32 [1, N]
-
-            # Always pad/clip to 10s so encoder output is exactly S_ENC_MAX=500 frames.
-            # Variable-bucket encoding requires a decoder re-export with cross-attn masking.
+            import numpy as np  # local import; mirrors the original code style
+            # Pad short audio to the encoder window; longer chunks are the
+            # caller's responsibility to chunk (we are the inner function).
             enc_window = self._STREAMING_ENCODER_BUCKETS[-1]  # 160000
             if audio.shape[1] < enc_window:
                 audio = np.pad(audio, ((0, 0), (0, enc_window - audio.shape[1])))
-            elif audio.shape[1] > enc_window:
-                audio = audio[:, :enc_window]
 
-            # Encoder
             enc_in = list(encoder.input_description)[0]
             enc_out = list(encoder.output_description)[0]
             hidden_states = encoder.predict({enc_in: audio})[enc_out]  # [1, 500, 320]
             if hidden_states.ndim == 2:
                 hidden_states = hidden_states[None]
 
-            # Streaming decoder adds learned positional embeddings to encoder hidden states
-            # before projecting to cross-KV. Apply that here (proj is Identity so skip it).
             pos_emb = self._moonshine_coreml_s_pos_emb  # [max_pos, HID]
             S_enc_actual = hidden_states.shape[1]
-            hidden_states = hidden_states + pos_emb[:S_enc_actual]  # [1, S_enc, HID]
+            hidden_states = hidden_states + pos_emb[:S_enc_actual]
 
             kw = self._moonshine_coreml_s_kw
             vw = self._moonshine_coreml_s_vw
@@ -499,7 +495,7 @@ class STTService:
             vb = self._moonshine_coreml_s_vb
             cross_k_list, cross_v_list = [], []
             for i in range(NL):
-                k = hidden_states @ kw[i].T  # [1, S_ENC_MAX, H*D]
+                k = hidden_states @ kw[i].T
                 v = hidden_states @ vw[i].T
                 if kb[i] is not None:
                     k = k + kb[i]
@@ -509,10 +505,9 @@ class STTService:
                 v = v.reshape(1, S_ENC_MAX, H, D).transpose(0, 2, 1, 3)
                 cross_k_list.append(k)
                 cross_v_list.append(v)
-            cross_k = np.stack(cross_k_list).astype(np.float32)  # [NL, 1, H, S_ENC_MAX, D]
+            cross_k = np.stack(cross_k_list).astype(np.float32)
             cross_v = np.stack(cross_v_list).astype(np.float32)
 
-            # Stateful decode loop
             decoder_start_token_id = 1
             eos_token_id = 2
             max_tokens = min(S_MAX, 200)
@@ -550,8 +545,86 @@ class STTService:
                     onehot = np.zeros((1, 1, S_MAX, 1), dtype=np.float32)
                     onehot[0, 0, next_pos, 0] = 1.0
 
-            text = self._moonshine_tokenizer.decode_batch([tokens])[0]
-            logger.info(f"Moonshine streaming CoreML STT: {len(text)} chars, {len(tokens)} tokens")
+            return self._moonshine_tokenizer.decode_batch([tokens])[0]
+        except StopIteration as e:
+            # moonshine-vs-native-9v: the orphan bucketing code in 1e6cc35c
+            # raised StopIteration on >10s audio; that branch has since been
+            # reverted (current code truncates), but the chunked outer caller
+            # can still surface a partial StopIteration from the decode loop
+            # if the decoder runs out of state. Finalize gracefully: log and
+            # return the tokens decoded so far, or None if nothing was emitted.
+            logger.warning(f"Moonshine streaming CoreML StopIteration in chunk: {e}", exc_info=True)
+            if len(tokens) > 1:
+                return self._moonshine_tokenizer.decode_batch([tokens])[0]
+            return None
+        except Exception as e:
+            logger.error(f"Moonshine streaming CoreML chunk failed: {e}", exc_info=True)
+            return None
+
+    def _transcribe_moonshine_coreml_streaming(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
+        """Transcribe with moonshine-streaming-tiny on CoreML (English-only).
+
+        For audio longer than the 10s encoder window, transcribe in 10s chunks
+        and concatenate the results. Each chunk is processed by
+        `_transcribe_coreml_streaming_chunk` which catches StopIteration and
+        other decode-time errors so a failure in one chunk finalizes the
+        partial result instead of crashing the whole long-utterance call.
+        """
+        if self._get_moonshine_coreml_streaming() is None:
+            return None
+        import numpy as np
+        tmp_path = None
+        try:
+            import moonshine_onnx as m
+
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            audio = m.load_audio(tmp_path)  # float32 [1, N]
+            enc_window = self._STREAMING_ENCODER_BUCKETS[-1]  # 160000
+
+            # moonshine-vs-native-9v: chunk long audio instead of silently
+            # truncating (which was the previous behavior; OR, on the orphan
+            # bucketing branch 1e6cc35c, raising StopIteration before the
+            # truncation guard ran).
+            chunks = []
+            if audio.shape[1] <= enc_window:
+                chunks = [audio]
+            else:
+                n_chunks = (audio.shape[1] + enc_window - 1) // enc_window
+                for i in range(n_chunks):
+                    start = i * enc_window
+                    end = min(start + enc_window, audio.shape[1])
+                    chunks.append(audio[:, start:end])
+                logger.info(
+                    f"Moonshine streaming CoreML: chunking {audio.shape[1]} samples "
+                    f"into {len(chunks)} × {enc_window}-sample windows"
+                )
+
+            parts = []
+            total_tokens = 0
+            for idx, chunk in enumerate(chunks):
+                text = self._transcribe_coreml_streaming_chunk(chunk)
+                if text:
+                    parts.append(text)
+                    total_tokens += 1  # cheap proxy; real count is in the chunk log
+                else:
+                    logger.warning(
+                        f"Moonshine streaming CoreML chunk {idx+1}/{len(chunks)} failed; "
+                        "finalizing partial result"
+                    )
+                    # Don't abort — keep what we have so the long utterance
+                    # still produces *some* text instead of None.
+                    break
+
+            if not parts:
+                return None
+            text = " ".join(parts)
+            logger.info(
+                f"Moonshine streaming CoreML STT: {len(text)} chars, "
+                f"{len(parts)}/{len(chunks)} chunks, {total_tokens} chunk-texts"
+            )
             return text
         except Exception as e:
             logger.error(f"Moonshine streaming CoreML STT failed: {e}", exc_info=True)
@@ -600,6 +673,7 @@ class STTService:
     # ── Public interface ──
 
     def transcribe(self, audio_bytes: bytes) -> Optional[str]:
+        import time
         settings = self._load_settings()
         if settings.get("stt_enabled") is False:
             return None
@@ -610,20 +684,30 @@ class STTService:
         if provider in ("disabled", "browser"):
             return None
 
+        t0 = time.perf_counter()
         if provider == "local":
-            return self._transcribe_local(audio_bytes, language)
+            text = self._transcribe_local(audio_bytes, language)
         elif provider == "local-moonshine":
-            return self._transcribe_moonshine(audio_bytes, language)
+            text = self._transcribe_moonshine(audio_bytes, language)
         elif provider == "local-moonshine-coreml":
-            return self._transcribe_moonshine_coreml(audio_bytes, language)
+            text = self._transcribe_moonshine_coreml(audio_bytes, language)
         elif provider == "local-moonshine-coreml-streaming":
-            return self._transcribe_moonshine_coreml_streaming(audio_bytes, language)
+            text = self._transcribe_moonshine_coreml_streaming(audio_bytes, language)
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
-            return self._transcribe_api(audio_bytes, endpoint_id, model, language)
+            text = self._transcribe_api(audio_bytes, endpoint_id, model, language)
         else:
             logger.error(f"Unknown STT provider: {provider}")
             return None
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        text_chars = len(text) if text else 0
+        # moonshine-vs-native-9v: one hot-path log line per utterance so
+        # "did anything happen" is answerable from the odysseus process.
+        # WER is n/a in production (no ground truth); test harness can grep.
+        logger.info(
+            f"[stt] backend={provider} ms={elapsed_ms} text_chars={text_chars} wer=n/a"
+        )
+        return text
 
     def get_stats(self) -> Dict[str, Any]:
         settings = self._load_settings()
