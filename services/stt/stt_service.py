@@ -201,7 +201,6 @@ class STTService:
             tokens = model.generate(audio)
             text = self._moonshine_tokenizer.decode_batch(tokens)[0]
 
-            logger.info(f"Moonshine STT: {len(text)} chars")
             return text
         except Exception as e:
             logger.error(f"Moonshine STT transcription failed: {e}", exc_info=True)
@@ -383,7 +382,6 @@ class STTService:
                     onehot[0, 0, next_pos, 0] = 1.0
 
             text = self._moonshine_tokenizer.decode_batch([tokens])[0]
-            logger.info(f"Moonshine CoreML STT: {len(text)} chars, {len(tokens)} tokens")
             return text
         except Exception as e:
             logger.error(f"Moonshine CoreML STT transcription failed: {e}", exc_info=True)
@@ -597,18 +595,12 @@ class STTService:
                     start = i * enc_window
                     end = min(start + enc_window, audio.shape[1])
                     chunks.append(audio[:, start:end])
-                logger.info(
-                    f"Moonshine streaming CoreML: chunking {audio.shape[1]} samples "
-                    f"into {len(chunks)} × {enc_window}-sample windows"
-                )
 
             parts = []
-            total_tokens = 0
             for idx, chunk in enumerate(chunks):
                 text = self._transcribe_coreml_streaming_chunk(chunk)
                 if text:
                     parts.append(text)
-                    total_tokens += 1  # cheap proxy; real count is in the chunk log
                 else:
                     logger.warning(
                         f"Moonshine streaming CoreML chunk {idx+1}/{len(chunks)} failed; "
@@ -621,10 +613,6 @@ class STTService:
             if not parts:
                 return None
             text = " ".join(parts)
-            logger.info(
-                f"Moonshine streaming CoreML STT: {len(text)} chars, "
-                f"{len(parts)}/{len(chunks)} chunks, {total_tokens} chunk-texts"
-            )
             return text
         except Exception as e:
             logger.error(f"Moonshine streaming CoreML STT failed: {e}", exc_info=True)
